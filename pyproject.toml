@@ -1,0 +1,24 @@
+[project]
+name = "AI_BIZ"
+version = "0.1.0"
+description = "Default template for PDM package"
+authors = [{ name = "Toan", email = "pntoan@software.misa.com.vn" }]
+dependencies = [
+    "pillow>=11.1.0",
+    "dotenv>=0.9.9",
+    "fastapi>=0.115.11",
+    "uvicorn>=0.34.0",
+    "pymilvus>=2.5.5",
+    "aiohttp>=3.11.14",
+    "langchain-core>=0.2.10",
+]
+requires-python = ">=3.13"
+readme = "README.md"
+license = { text = "MIT" }
+
+
+[tool.pdm]
+distribution = false
+
+[tool.pdm.scripts]
+start = "python server.py"
