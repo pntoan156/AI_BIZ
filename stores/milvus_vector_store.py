@@ -26,7 +26,6 @@ class MilvusVectorStore(BaseVectorStore):
         text_field: str = "text", # Field for text content
         # vector_field is removed, specific fields below
         id_field: str = "id",
-        database_id_field: str = "database_id",
         metadata_fields: Optional[List[Tuple[str, str]]] = None, # e.g., [("metadata", DataType.JSON)]
         clip_dimension: int = 512, # Default CLIP dimension
         resnet_dimension: int = 2048, # Default ResNet dimension
@@ -46,7 +45,6 @@ class MilvusVectorStore(BaseVectorStore):
             password: Mật khẩu. Mặc định lấy từ biến môi trường MILVUS_PASSWORD
             text_field: Tên trường chứa văn bản gốc.
             id_field: Tên trường chứa ID chính (primary key).
-            database_id_field: Tên trường chứa DatabaseId (partition key).
             metadata_fields: Danh sách các trường metadata bổ sung và kiểu dữ liệu (e.g., [("metadata", DataType.JSON)]).
             clip_dimension: Số chiều cho vector CLIP.
             resnet_dimension: Số chiều cho vector ResNet.
@@ -57,7 +55,6 @@ class MilvusVectorStore(BaseVectorStore):
         self.embedding_function = embedding_function # Used for text embedding and potentially dim inference
         self.text_field = text_field
         self.id_field = id_field
-        self.database_id_field = database_id_field
         self.clip_dimension = clip_dimension
         self.resnet_dimension = resnet_dimension
         self.text_vector_field = text_vector_field
@@ -65,6 +62,7 @@ class MilvusVectorStore(BaseVectorStore):
         # Lấy thông tin kết nối từ biến môi trường nếu không được cung cấp
         self.uri = uri or get_env("MILVUS_URI", "http://localhost:19530")
         self.db_name = db_name or get_env("MILVUS_DB_NAME", "default")
+        print(f"MILVUS_DB_NAME: {self.db_name}")
         self.user = user or get_env("MILVUS_USER", "")
         self.password = password or get_env("MILVUS_PASSWORD", "")
         
@@ -135,7 +133,6 @@ class MilvusVectorStore(BaseVectorStore):
             FieldSchema(name=self.text_field, dtype=DataType.VARCHAR, max_length=65535),
             FieldSchema(name=self.text_vector_field, dtype=DataType.FLOAT_VECTOR, dim=dim),
             FieldSchema(name="inventory_item_id", dtype=DataType.VARCHAR, max_length=100),
-            FieldSchema(name=self.database_id_field, dtype=DataType.VARCHAR, max_length=36, is_partition_key=True)
         ]
         
         # Thêm các trường metadata
@@ -237,7 +234,6 @@ class MilvusVectorStore(BaseVectorStore):
         # Thêm các trường cơ bản
         fields.append(FieldSchema(name="image_path", dtype=DataType.VARCHAR, max_length=65535))
         fields.append(FieldSchema(name="metadata", dtype=DataType.JSON, is_nullable=True))  # Thêm trường metadata và cho phép null
-        fields.append(FieldSchema(name="database_id", dtype=DataType.VARCHAR, max_length=36))  # Thêm trường database_id
 
         # Thêm các trường metadata được định nghĩa trong metadata_fields (thường là 'metadata' JSON)
         for field_name, field_type in self.metadata_fields:
@@ -312,9 +308,6 @@ class MilvusVectorStore(BaseVectorStore):
         if metadatas is None:
             metadatas = [{} for _ in texts]
         
-        # Tạo database_ids nếu không được cung cấp
-        database_ids = kwargs.get("database_ids", [str(uuid.uuid4()) for _ in range(len(texts))])
-        
         # Tạo vectors từ texts
         vectors = [self.embedding_function(text) for text in texts]
         
@@ -323,7 +316,6 @@ class MilvusVectorStore(BaseVectorStore):
             ids,                   # ID field
             texts,                 # Text field
             vectors,               # Vector field
-            database_ids,          # DatabaseId field
             metadatas,             # Metadata field
         ]
         
@@ -351,7 +343,6 @@ class MilvusVectorStore(BaseVectorStore):
         self, 
         query: str, 
         k: int = 4, 
-        database_id: Optional[str] = None,
         **kwargs
     ) -> List[Tuple[Any, float]]:
         """
@@ -360,7 +351,6 @@ class MilvusVectorStore(BaseVectorStore):
         Args:
             query: Câu truy vấn
             k: Số lượng kết quả trả về
-            database_id: ID cơ sở dữ liệu để lọc kết quả (tùy chọn)
             
         Returns:
             List[Tuple[Any, float]]: Danh sách tuple gồm tài liệu và độ tương đồng
@@ -371,10 +361,7 @@ class MilvusVectorStore(BaseVectorStore):
         # Thực hiện tìm kiếm
         search_params = {"metric_type": "COSINE", "params": {"ef": 64}}
         
-        # Thêm bộ lọc nếu có database_id
         expr = None
-        if database_id:
-            expr = f'{self.database_id_field} == "{database_id}"'
         
         results = self.collection.search(
             data=[query_vector],
@@ -382,7 +369,7 @@ class MilvusVectorStore(BaseVectorStore):
             param=search_params,
             limit=k,
             expr=expr,
-            output_fields=[self.text_field, self.database_id_field, "metadata"]
+            output_fields=[self.text_field, "metadata"]
         )
         
         # Chuyển đổi kết quả sang định dạng trả về
@@ -391,7 +378,6 @@ class MilvusVectorStore(BaseVectorStore):
             doc = {
                 "id": hit.id,
                 "text": hit.entity.get(self.text_field),
-                "database_id": hit.entity.get(self.database_id_field),
                 "metadata": hit.entity.get("metadata")
             }
             docs_with_scores.append((doc, hit.score))
@@ -402,7 +388,6 @@ class MilvusVectorStore(BaseVectorStore):
         self, 
         query: str, 
         k: int = 4, 
-        database_id: Optional[str] = None,
         **kwargs
     ) -> List[Tuple[Any, float]]:
         """
@@ -411,7 +396,6 @@ class MilvusVectorStore(BaseVectorStore):
         Args:
             query: Câu truy vấn
             k: Số lượng kết quả trả về
-            database_id: ID cơ sở dữ liệu để lọc kết quả (tùy chọn)
             
         Returns:
             List[Tuple[Any, float]]: Danh sách tuple gồm tài liệu và điểm số
@@ -420,13 +404,9 @@ class MilvusVectorStore(BaseVectorStore):
             # Thực hiện full-text search
             expr = f'{self.text_field} like "%{query}%"'
             
-            # Thêm bộ lọc nếu có database_id
-            if database_id:
-                expr = f'({expr}) && ({self.database_id_field} == "{database_id}")'
-            
             results = self.collection.query(
                 expr=expr,
-                output_fields=[self.id_field, self.text_field, self.database_id_field, "metadata"],
+                output_fields=[self.id_field, self.text_field, "metadata"],
                 limit=k
             )
             
@@ -447,7 +427,6 @@ class MilvusVectorStore(BaseVectorStore):
                 doc = {
                     "id": item.get(self.id_field),
                     "text": item.get(self.text_field),
-                    "database_id": item.get(self.database_id_field),
                     "metadata": item.get("metadata", {})
                 }
                 docs_with_scores.append((doc, min(score, 1.0)))
@@ -465,7 +444,6 @@ class MilvusVectorStore(BaseVectorStore):
         query: str, 
         k: int = 4, 
         alpha: float = 0.5, 
-        database_id: Optional[str] = None,
         **kwargs
     ) -> List[Tuple[Any, float]]:
         """
@@ -475,14 +453,13 @@ class MilvusVectorStore(BaseVectorStore):
             query: Câu truy vấn
             k: Số lượng kết quả trả về
             alpha: Trọng số cho kết quả vector similarity (0-1)
-            database_id: ID cơ sở dữ liệu để lọc kết quả (tùy chọn)
             
         Returns:
             List[Tuple[Any, float]]: Danh sách tuple gồm tài liệu và điểm số kết hợp
         """
         # Lấy kết quả từ cả hai phương pháp
-        vector_results = self.similarity_search(query, k=k*2, database_id=database_id, **kwargs)
-        fulltext_results = self.fulltext_search(query, k=k*2, database_id=database_id, **kwargs)
+        vector_results = self.similarity_search(query, k=k*2, **kwargs)
+        fulltext_results = self.fulltext_search(query, k=k*2, **kwargs)
         
         # Tạo map từ ID đến kết quả và điểm số
         results_map = {}

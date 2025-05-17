@@ -45,7 +45,6 @@ async def process_images_folder(folder_path: str, tags_file_path: Optional[str],
                 'image_name': product_info['name'],  # Sử dụng name từ CSV
                 'image_path': product_info['id'] + '.jpg',
                 'image_bytes': image_bytes,
-                'database_id': db_id,
             })
     
     return images_data 

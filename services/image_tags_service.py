@@ -57,7 +57,6 @@ async def process_tags_file(
                 "id": tag_data.get('id', ''),
                 "image_path": tag_data.get('image_path', ''),
                 "image_name": tag_data.get('name', ''),
-                "database_id": db_id
             })
         
         # Thêm vào vector store
