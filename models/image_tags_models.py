@@ -2,8 +2,6 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 class ImageTagsEmbedRequest(BaseModel):
-    folder_path: str
-    tags_file_path: Optional[str] = None
     db_id: str
     recreate_collection: bool = False
 
