@@ -5,12 +5,12 @@ import aiohttp
 import io
 from typing import List, Dict, Optional
 
-async def fetch_products_csv(api_url: str) -> List[Dict]:
+async def fetch_inventory_items_csv(api_url: str) -> List[Dict]:
     """
-    Lấy và xử lý file products.csv từ API
+    Lấy và xử lý file inventory_items.csv từ API
     
     Args:
-        api_url (str): URL của API get-products-csv
+        api_url (str): URL của API get-inventory-items-csv
         
     Returns:
         List[Dict]: Danh sách thông tin sản phẩm từ CSV
@@ -26,65 +26,40 @@ async def fetch_products_csv(api_url: str) -> List[Dict]:
             reader = csv.DictReader(csv_file)
             return list(reader)
 
-async def fetch_images(api_url: str, image_ids: List[str]) -> List[Dict]:
-    """
-    Lấy dữ liệu ảnh từ API theo batch
-    
-    Args:
-        api_url (str): URL của API get-images
-        image_ids (List[str]): Danh sách ID ảnh cần lấy
-        
-    Returns:
-        List[Dict]: Danh sách thông tin ảnh
-    """
-    async with aiohttp.ClientSession() as session:
-        async with session.post(api_url, json={"image_ids": image_ids}) as response:
-            if response.status != 200:
-                raise Exception(f"Failed to fetch images: {response.status}")
-            
-            result = await response.json()
-            if not result.get("success"):
-                raise Exception(f"API error: {result.get('message')}")
-                
-            return result.get("data", [])
-
-async def process_products_in_batches(batch_size: int = 500):
+async def process_inventory_items_in_batches(batch_size: int = 500):
     """
     Xử lý sản phẩm theo batch
     
     Args:
-        products_api_url (str): URL của API get-products-csv
-        images_api_url (str): URL của API get-images
+        inventory_items_api_url (str): URL của API get-inventory-items-csv
         batch_size (int): Kích thước mỗi batch
     
     Returns:
         List[Dict]: Danh sách dữ liệu đã xử lý
     """
     # Example URLs - sẽ được cấu hình sau
-    PRODUCTS_API_URL = "http://example.com/api/get-products-csv"
-    IMAGES_API_URL = "http://example.com/api/get-images"
+    INVENTORY_ITEMS_API_URL = "http://example.com/api/get-inventory-items-csv"
     
     # Lấy danh sách sản phẩm từ CSV
-    products = await fetch_products_csv(PRODUCTS_API_URL)
-    if not products:
+    inventory_items = await fetch_inventory_items_csv(INVENTORY_ITEMS_API_URL)
+    if not inventory_items:
         raise Exception("Không tìm thấy sản phẩm nào trong CSV")
     
     # Xử lý theo batch
     all_processed_data = []
-    for i in range(0, len(products), batch_size):
-        batch = products[i:i + batch_size]
-        image_ids = [p['id'] for p in batch]
+    for i in range(0, len(inventory_items), batch_size):
+        batch = inventory_items[i:i + batch_size]
         
-        # Lấy dữ liệu ảnh cho batch hiện tại
-        images_data = await fetch_images(IMAGES_API_URL, image_ids)
-        
-        # Kết hợp thông tin từ CSV với dữ liệu ảnh
-        for img_data in images_data:
-            product_info = next((p for p in batch if p['id'] == img_data['image_id']), None)
-            if product_info:
-                img_data['image_name'] = product_info.get('name', '')
-        
-        all_processed_data.extend(images_data)
-        print(f"Đã xử lý batch {i//batch_size + 1}/{(len(products) + batch_size - 1)//batch_size}")
+        # Xử lý dữ liệu từ CSV
+        for item in batch:
+            processed_item = {
+                'id': item['id'],
+                'name': item.get('name', ''),
+                'image_url': item.get('image_url', ''),
+                'image_name': item.get('name', '')
+            }
+            all_processed_data.append(processed_item)
+            
+        print(f"Đã xử lý batch {i//batch_size + 1}/{(len(inventory_items) + batch_size - 1)//batch_size}")
     
     return all_processed_data

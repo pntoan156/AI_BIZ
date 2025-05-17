@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 from migrate_products_to_store import MigrateRequest, MigrateResponse
 from services.image_tags_service import search_images_by_name
-from util.image_processor import process_products_in_batches
+from util.image_processor import process_inventory_items_in_batches
 from stores.image_tags_store import embed_and_store_images
 from models.image_tags_models import ImageSearchRequest, ImageSearchResponse, ImageTagsEmbedRequest, ImageTagsEmbedResponse
 from models.image_tags_models import (
@@ -30,7 +30,7 @@ async def migrate_images(request: ImageTagsEmbedRequest):
     """
     try:
         # Xử lý ảnh từ API bên ngoài
-        images_data = await process_products_in_batches()
+        images_data = await process_inventory_items_in_batches()
         
         if not images_data:
             return ImageTagsEmbedResponse(
