@@ -2,7 +2,6 @@
 name = "AI_BIZ"
 version = "0.1.0"
 description = "Default template for PDM package"
-authors = [{ name = "Toan", email = "pntoan@software.misa.com.vn" }]
 dependencies = [
     "pillow>=11.1.0",
     "dotenv>=0.9.9",
