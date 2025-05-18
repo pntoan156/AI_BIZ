@@ -15,8 +15,12 @@ async def fetch_inventory_items_csv(api_url: str) -> List[Dict]:
     Returns:
         List[Dict]: Danh sách thông tin sản phẩm từ CSV
     """
+    headers = {
+        "x-ai-key": "AI-MISA-ESHOP-2025-310526be-637a-40dd-b50d-ed8a677fd9e2"
+    }
+    
     async with aiohttp.ClientSession() as session:
-        async with session.get(api_url) as response:
+        async with session.post(api_url, headers=headers) as response:
             if response.status != 200:
                 raise Exception(f"Failed to fetch CSV: {response.status}")
             
@@ -38,7 +42,7 @@ async def process_inventory_items_in_batches(batch_size: int = 500):
         List[Dict]: Danh sách dữ liệu đã xử lý
     """
     # Example URLs - sẽ được cấu hình sau
-    INVENTORY_ITEMS_API_URL = "http://example.com/api/get-inventory-items-csv"
+    INVENTORY_ITEMS_API_URL = "https://eshopapp.misa.vn/g2/api/aibiz/aibizs/inventory-items-info"
     
     # Lấy danh sách sản phẩm từ CSV
     inventory_items = await fetch_inventory_items_csv(INVENTORY_ITEMS_API_URL)
@@ -53,10 +57,9 @@ async def process_inventory_items_in_batches(batch_size: int = 500):
         # Xử lý dữ liệu từ CSV
         for item in batch:
             processed_item = {
-                'id': item['id'],
-                'name': item.get('name', ''),
-                'image_url': item.get('image_url', ''),
-                'image_name': item.get('name', '')
+                'image_id': item['image_id'],
+                'image_path': item.get('image_path', ''),
+                'image_name': item.get('image_name', '')
             }
             all_processed_data.append(processed_item)
             
