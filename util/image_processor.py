@@ -4,6 +4,7 @@ import base64
 import aiohttp
 import io
 from typing import List, Dict, Optional
+from util.env_loader import get_env
 
 async def fetch_inventory_items_csv(api_url: str) -> List[Dict]:
     """
@@ -42,8 +43,8 @@ async def process_inventory_items_in_batches(batch_size: int = 500):
         List[Dict]: Danh sách dữ liệu đã xử lý
     """
     # Example URLs - sẽ được cấu hình sau
-    INVENTORY_ITEMS_API_URL = "https://eshopapp.misa.vn/g2/api/aibiz/aibizs/inventory-items-info"
-    
+    INVENTORY_ITEMS_API_URL = get_env("INVENTORY_ITEMS_API_URL")
+    print(INVENTORY_ITEMS_API_URL)
     # Lấy danh sách sản phẩm từ CSV
     inventory_items = await fetch_inventory_items_csv(INVENTORY_ITEMS_API_URL)
     if not inventory_items:
