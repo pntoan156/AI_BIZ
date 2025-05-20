@@ -2,7 +2,7 @@ import json
 import os
 from typing import Dict, Any, Optional, List, Tuple
 from stores.image_tags_store import ImageTagsStore
-from models.image_tags_models import ImageSearchResult
+from models.image_tags_models import ProductImageResult
 
 async def process_tags_file(
     folder_path: str,
@@ -104,11 +104,9 @@ async def search_images_by_name(
         # Chuyển đổi kết quả sang định dạng response
         search_results = []
         for doc, score in results:
-            result = ImageSearchResult(
-                id=doc.get("id", ""),
-                name=doc.get("text", ""),  # text field contains the image name
-                image_path=doc.get("image_path", ""),
-                score=score
+            result = ProductImageResult(
+                product_name=doc.get("text", ""),  # text field contains the image name
+                image_path=doc.get("image_path", "")
             )
             search_results.append(result)
             

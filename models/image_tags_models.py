@@ -12,17 +12,11 @@ class ImageTagsEmbedResponse(BaseModel):
     total_error: int = 0 
     
 class ImageSearchRequest(BaseModel):
-    image_name: str
-    limit: int = 10
+    product_names: List[str]
     
-class ImageSearchResult(BaseModel):
-    id: str
-    name: str
+class ProductImageResult(BaseModel):
+    product_name: str
     image_path: str
-    score: float
 
 class ImageSearchResponse(BaseModel):
-    success: bool
-    message: str
-    results: List[ImageSearchResult]
-    total: int 
+    results: List[ProductImageResult] 

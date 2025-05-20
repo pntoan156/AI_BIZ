@@ -61,20 +61,22 @@ async def migrate_images(request: ImageTagsEmbedRequest):
 @app.post("/api/v1/images/search-by-name", response_model=ImageSearchResponse)
 async def search_images(request: ImageSearchRequest):
     """
-    Endpoint tìm kiếm ảnh theo tên sử dụng vector similarity
-    
-    Args:
-        request (ImageSearchRequest): Thông tin request tìm kiếm
-        
-    Returns:
-        ImageSearchResponse: Kết quả tìm kiếm
+    Endpoint tìm kiếm ảnh theo nhiều tên sản phẩm, trả về ảnh có độ tương đồng cao nhất cho mỗi sản phẩm
     """
-    result = await search_images_by_name(
-        image_name=request.image_name,
-        limit=request.limit
-    )
+    results = []
+    for product_name in request.product_names:
+        result = await search_images_by_name(
+            image_name=product_name,
+            limit=1
+        )
+        if result.get("results"):
+            best_match = result["results"][0]
+            results.append({
+                "product_name": product_name,
+                "image_path": best_match.image_path
+            })
     
-    return ImageSearchResponse(**result)
+    return ImageSearchResponse(results=results)
 
 if __name__ == "__main__":
     import uvicorn
