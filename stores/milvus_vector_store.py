@@ -89,13 +89,44 @@ class MilvusVectorStore(BaseVectorStore):
         """
         Kết nối tới Milvus server
         """
-        connections.connect(
-            alias="default", 
-            uri=self.uri,
-            db_name=self.db_name,
-            user=self.user,
-            password=self.password
-        )
+        try:
+            # Kết nối tới Milvus server với database đã chọn
+            connections.connect(
+                alias="default", 
+                uri=self.uri,
+                db_name=self.db_name,
+                user=self.user,
+                password=self.password
+            )
+            print(f"Đã kết nối tới database '{self.db_name}'")
+        except Exception as e:
+            # Nếu lỗi là do database không tồn tại, thử tạo mới
+            if "database not found" in str(e).lower():
+                # Kết nối lại không chỉ định database
+                connections.connect(
+                    alias="default", 
+                    uri=self.uri,
+                    user=self.user,
+                    password=self.password
+                )
+                # Tạo database mới
+                from pymilvus import db
+                db.create_database(self.db_name)
+                print(f"Đã tạo database '{self.db_name}'")
+                
+                # Kết nối lại với database mới
+                connections.disconnect("default")
+                connections.connect(
+                    alias="default", 
+                    uri=self.uri,
+                    db_name=self.db_name,
+                    user=self.user,
+                    password=self.password
+                )
+                print(f"Đã kết nối tới database '{self.db_name}'")
+            else:
+                print(f"Lỗi khi kết nối: {e}")
+                raise
     
     def _get_vector_dim(self) -> int:
         """
