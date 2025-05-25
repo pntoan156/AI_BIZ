@@ -4,7 +4,7 @@ from stores.vector_store_provider import get_vector_store
 from embeddings.embedding_provider import get_embedding_model
 from stores.base_vector_store import BaseVectorStore
 
-class ImageTagsStore(BaseVectorStore):
+class ImageStore(BaseVectorStore):
     def __init__(self, collection_name: str = "image_collection", recreate_collection: bool = False):
         """
         Khởi tạo ImageVectorStore
@@ -57,6 +57,7 @@ class ImageTagsStore(BaseVectorStore):
                     "vector": vector,
                     "text": text,
                     "image_path": metadata.get("image_path", ""),
+                    "category": metadata.get("category", ""),
                     "metadata": metadata
                 }
                 data.append(record)
@@ -153,53 +154,11 @@ class ImageTagsStore(BaseVectorStore):
             return []
 
     def hybrid_search(
-        self,
-        query: str,
-        limit: int = 10
-    ) -> List[Tuple[Dict[str, Any], float]]:
-        """
-        Tìm kiếm hybrid (kết hợp vector và fulltext)
-        
-        Args:
-            query: Câu truy vấn
-            limit: Số lượng kết quả
-            
-        Returns:
-            List[Tuple[Dict[str, Any], float]]: Danh sách kết quả và score
-        """
-        # Lấy kết quả từ vector search
-        vector_results = self.similarity_search(query, limit)
-        
-        # Lấy kết quả từ fulltext search
-        text_results = self.fulltext_search(query, limit)
-        
-        # Kết hợp và sắp xếp kết quả
-        combined_results = {}
-        for doc, score in vector_results + text_results:
-            doc_id = doc["id"]
-            if doc_id not in combined_results or score > combined_results[doc_id][1]:
-                combined_results[doc_id] = (doc, score)
-                
-        return sorted(combined_results.values(), key=lambda x: x[1], reverse=True)[:limit]
-
-    def get_collection_stats(self) -> Dict[str, Any]:
-        """
-        Lấy thống kê của collection
-        
-        Returns:
-            Dict[str, Any]: Thông tin thống kê
-        """
-        stats = self.vectorstore.collection.get_stats()
-        return {
-            "total_rows": stats.get("row_count", 0),
-            "collection_name": self.collection_name
-        }
-        
-    def hybrid_search(
         self, 
         query: str, 
         k: int = 4, 
-        alpha: float = 0.5, 
+        alpha: float = 0.5,
+        category: str = "all",
         **kwargs
     ) -> List[Tuple[Any, float]]:
         """
@@ -209,12 +168,13 @@ class ImageTagsStore(BaseVectorStore):
             query: Câu truy vấn
             k: Số lượng kết quả trả về
             alpha: Trọng số cho kết quả vector similarity (0-1)
+            category: Danh mục để lọc kết quả
             
         Returns:
             List[Tuple[Any, float]]: Danh sách tuple gồm tài liệu và điểm số kết hợp
         """
         # Lấy kết quả từ cả hai phương pháp
-        vector_results = self.similarity_search(query, k=k*2, **kwargs)
+        vector_results = self.similarity_search(query, k=k*2, category=category, **kwargs)
         fulltext_results = self.fulltext_search(query, k=k*2, **kwargs)
         
         # Tạo map từ ID đến kết quả và điểm số
@@ -234,6 +194,9 @@ class ImageTagsStore(BaseVectorStore):
                 results_map[doc_id] = {"doc": doc, "vector_score": 0, "text_score": 0}
             results_map[doc_id]["text_score"] = score
         
+        print(f"fulltext_results: {fulltext_results}")
+        print(f"vector_results: {vector_results}")
+        
         # Tính điểm kết hợp
         hybrid_results = []
         for doc_id, result in results_map.items():
@@ -248,85 +211,75 @@ class ImageTagsStore(BaseVectorStore):
     def similarity_search(
         self,
         query: str,
-        k: int = 10
+        k: int = 10,
+        category: str = "all"
     ) -> List[Tuple[Dict[str, Any], float]]:
         """
         Tìm kiếm similarity dựa trên text query
         
         Args:
             query: Text query để tìm kiếm
-            limit: Số lượng kết quả trả về
+            k: Số lượng kết quả trả về
+            category: Danh mục để lọc kết quả
             
         Returns:
             List[Tuple[Dict[str, Any], float]]: Danh sách kết quả và score
         """
         # Tạo vector từ query
         query_vector = self.embedding_function.embed_query(query)
-            
-        # Thực hiện tìm kiếm
-        results = self.vectorstore.collection.search(
-            data=[query_vector],
-            anns_field="vector",
-            param={"metric_type": "COSINE", "params": {"ef": 64}},
-            limit=k,
-            output_fields=["id", "text", "image_path"]
-        )
         
-        # Format kết quả
+        # Tạo điều kiện tìm kiếm
+        expr = None
+        if category != "all":
+            # Sử dụng cú pháp StringLiteral với dấu nháy đơn
+            expr = f"category == '{category}'"
+        
+        # Thực hiện tìm kiếm
+        search_params = {
+            "metric_type": "COSINE",
+            "params": {"ef": 64}
+        }
+        
+        print(f"Executing search with expr: {expr}")  # Debug log
+        
+        if expr:
+            results = self.vectorstore.collection.search(
+                data=[query_vector],
+                anns_field="vector",
+                param=search_params,
+                limit=k,
+                expr=expr,
+                output_fields=["id", "text", "image_path", "category", "metadata"]
+            )
+        else:
+            results = self.vectorstore.collection.search(
+                data=[query_vector],
+                anns_field="vector",
+                param=search_params,
+                limit=k,
+                output_fields=["id", "text", "image_path", "category", "metadata"]
+            )
+        
+
+        # Format kết quả và tính toán điểm số
         docs_with_scores = []
         for hit in results[0]:
             doc = {
                 "id": hit.entity.get("id"),
                 "text": hit.entity.get("text"),
-                "image_path": hit.entity.get("image_path")
+                "image_path": hit.entity.get("image_path"),
+                "category": hit.entity.get("category"),
+                "metadata": hit.entity.get("metadata", {})
             }
-            docs_with_scores.append((doc, hit.score))
+            
+            # Tính điểm số với trọng số
+            score = hit.score
+            # if category != "all" and doc["category"] == category:
+            #     # Tăng điểm cho kết quả có category khớp
+            #     score *= 1.5
+            
+            docs_with_scores.append((doc, score))
             
         return docs_with_scores
-    
-async def embed_and_store_images(images_data: List[Dict], recreate_collection: bool = False):
-    """
-    Embed và lưu trữ ảnh vào vector store
-    
-    Args:
-        images_data (List[Dict]): Danh sách dữ liệu ảnh
-        recreate_collection (bool): Có tạo lại collection không
         
-    Returns:
-        Dict: Kết quả xử lý
-    """
-    # Khởi tạo image vector store
-    image_store = ImageTagsStore(recreate_collection=recreate_collection)
-    
-    try:
-        # Chuẩn bị texts và metadata
-        texts = []
-        metadatas = []
-        
-        for img_data in images_data:
-            texts.append(img_data['image_name'])
-            metadatas.append({
-                "id": img_data['image_id'],
-                "image_path": img_data['image_path'],
-                "image_name": img_data['image_name']
-            })
-        
-        # Thêm vào vector store
-        image_store.add_texts(texts, metadatas)
-        
-        return {
-            "success": True,
-            "processed_count": len(images_data),
-            "error_count": 0,
-            "total": len(images_data)
-        }
-        
-    except Exception as e:
-        print(f"Error processing images: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e),
-            "processed_count": 0,
-            "error_count": len(images_data),
-            "total": len(images_data)
-        } 
+        raise

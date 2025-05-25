@@ -113,12 +113,3 @@ class BaseVectorStore(ABC):
         """
         pass
     
-    @abstractmethod
-    def get_collection_stats(self) -> Dict[str, Any]:
-        """
-        Lấy thông tin thống kê về collection
-        
-        Returns:
-            Dict[str, Any]: Thông tin thống kê
-        """
-        pass 

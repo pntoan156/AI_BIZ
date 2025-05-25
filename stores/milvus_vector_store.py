@@ -264,7 +264,8 @@ class MilvusVectorStore(BaseVectorStore):
 
         # Thêm các trường cơ bản
         fields.append(FieldSchema(name="image_path", dtype=DataType.VARCHAR, max_length=65535))
-        fields.append(FieldSchema(name="metadata", dtype=DataType.JSON, is_nullable=True))  # Thêm trường metadata và cho phép null
+        fields.append(FieldSchema(name="category", dtype=DataType.VARCHAR, max_length=100))
+        fields.append(FieldSchema(name="metadata", dtype=DataType.JSON, is_nullable=True))
 
         # Thêm các trường metadata được định nghĩa trong metadata_fields (thường là 'metadata' JSON)
         for field_name, field_type in self.metadata_fields:

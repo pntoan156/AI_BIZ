@@ -5,8 +5,9 @@ import aiohttp
 import io
 from typing import List, Dict, Optional
 from util.env_loader import get_env
+from models.image_models import ImageModel
 
-async def fetch_inventory_items(api_url: str, page_index: int = 1, page_size: int = 500) -> Dict:
+async def fetch_inventory_items(api_url: str, page_index: int = 1, page_size: int = 500) -> Dict[str, List[ImageModel]]:
     """
     Lấy danh sách sản phẩm từ API với phân trang
     
@@ -17,7 +18,7 @@ async def fetch_inventory_items(api_url: str, page_index: int = 1, page_size: in
         
     Returns:
         Dict: {
-            "Data": List[Dict] - Danh sách sản phẩm (id, name, type, unit_name, file_names),
+            "Data": List[ImageModel] - Danh sách sản phẩm,
             "TotalRecords": int - Tổng số bản ghi
         }
     """
@@ -31,11 +32,17 @@ async def fetch_inventory_items(api_url: str, page_index: int = 1, page_size: in
     }
     
     async with aiohttp.ClientSession() as session:
-        async with session.get(api_url, headers=headers, params=params) as response:
+        async with session.post(api_url, headers=headers, json=params) as response:
             if response.status != 200:
                 raise Exception(f"Failed to fetch inventory items: {response.status}")
             
-            return await response.json()
+            data = await response.json()
+            
+            # Chuyển đổi dữ liệu thành list ImageModel
+            if data.get("Data"):
+                data["Data"] = [ImageModel(**item) for item in data["Data"]]
+            
+            return data
 
 async def process_inventory_items_in_batches(batch_size: int = 500):
     """
@@ -57,25 +64,19 @@ async def process_inventory_items_in_batches(batch_size: int = 500):
     total_records = first_page["TotalRecords"]
     total_pages = (total_records + batch_size - 1) // batch_size
     
-    # Xử lý dữ liệu từ trang đầu
+    # Xử lý tất cả các trang
     all_processed_data = []
-    for item in first_page["Data"]:
-        processed_item = {
-            'image_id': item['id'],
-            'image_path': item.get('file_names', ''),
-            'image_name': f"{item.get('name', '')} ({item.get('unit_name', '')})"
-        }
-        all_processed_data.append(processed_item)
-    
-    # Xử lý các trang tiếp theo
-    for page in range(2, total_pages + 1):
+    for page in range(1, total_pages + 1):
+        # Lấy dữ liệu trang hiện tại
         page_data = await fetch_inventory_items(INVENTORY_ITEMS_API_URL, page, batch_size)
         
+        # Xử lý dữ liệu từng sản phẩm trong trang
         for item in page_data["Data"]:
             processed_item = {
-                'image_id': item['id'],
-                'image_path': item.get('file_names', ''),
-                'image_name': f"{item.get('name', '')} ({item.get('unit_name', '')})"
+                'image_id': item.id,
+                'image_path': item.file_names,
+                'image_name': f"{item.name} ({item.unit_name})",
+                'category': item.category
             }
             all_processed_data.append(processed_item)
             

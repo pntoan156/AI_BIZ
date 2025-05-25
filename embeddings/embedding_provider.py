@@ -25,10 +25,6 @@ def get_embedding_model(provider: str = None, model_params: Optional[Dict[str, A
     if model_params is None:
         model_params = {}
     
-    # Nếu không chỉ định provider, lấy từ biến môi trường EMBEDDING_PROVIDER
-    if provider is None:
-        provider = get_env("EMBEDDING_PROVIDER", "aicore").lower()
-    
     if provider == "aicore":
         return _get_aicore_embeddings(model_params)
     else:
@@ -54,29 +50,3 @@ def _get_aicore_embeddings(model_params: Dict[str, Any]) -> AiCoreEmbedding:
     params = {**default_params, **model_params}
     
     return AiCoreEmbedding(**params)
-
-# --- Placeholder Embedding for Image Store Initialization ---
-
-class PlaceholderImageEmbedding:
-    """
-    Một lớp embedding giả lập chỉ dùng để khởi tạo VectorStore
-    khi vector thực tế được tính toán trước.
-    Nó cần phải callable và trả về một list/array để _get_vector_dim hoạt động.
-    """
-    def __init__(self, dimension: int):
-        self.dimension = dimension
-        # Tạo sẵn vector 0 để trả về
-        self._dummy_vector = [0.0] * dimension
-
-    def __call__(self, text: str) -> List[float]:
-        """Làm cho đối tượng callable, trả về vector 0."""
-        # print(f"PlaceholderImageEmbedding called with text: '{text}'") # Debugging
-        return self._dummy_vector
-
-    def embed_query(self, text: str) -> List[float]:
-        """Triển khai phương thức embed_query theo interface Embeddings."""
-        return self._dummy_vector
-
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Triển khai phương thức embed_documents theo interface Embeddings."""
-        return [self._dummy_vector for _ in texts]
