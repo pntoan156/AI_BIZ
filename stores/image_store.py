@@ -58,6 +58,8 @@ class ImageStore(BaseVectorStore):
                     "text": text,
                     "image_path": metadata.get("image_path", ""),
                     "category": metadata.get("category", ""),
+                    "style": metadata.get("style", ""),
+                    "app_name": metadata.get("app_name", ""),
                     "metadata": metadata
                 }
                 data.append(record)
@@ -159,6 +161,7 @@ class ImageStore(BaseVectorStore):
         k: int = 4, 
         alpha: float = 0.5,
         category: str = "all",
+        app_name: str = "all",
         **kwargs
     ) -> List[Tuple[Any, float]]:
         """
@@ -169,12 +172,13 @@ class ImageStore(BaseVectorStore):
             k: Số lượng kết quả trả về
             alpha: Trọng số cho kết quả vector similarity (0-1)
             category: Danh mục để lọc kết quả
+            app_name: Tên app để lọc kết quả
             
         Returns:
             List[Tuple[Any, float]]: Danh sách tuple gồm tài liệu và điểm số kết hợp
         """
         # Lấy kết quả từ cả hai phương pháp
-        vector_results = self.similarity_search(query, k=k*2, category=category, **kwargs)
+        vector_results = self.similarity_search(query, k=k*2, category=category, app_name=app_name, **kwargs)
         fulltext_results = self.fulltext_search(query, k=k*2, **kwargs)
         
         # Tạo map từ ID đến kết quả và điểm số
@@ -212,7 +216,8 @@ class ImageStore(BaseVectorStore):
         self,
         query: str,
         k: int = 10,
-        category: str = "all"
+        category: str = "all",
+        app_name: str = "all"
     ) -> List[Tuple[Dict[str, Any], float]]:
         """
         Tìm kiếm similarity dựa trên text query
@@ -221,6 +226,7 @@ class ImageStore(BaseVectorStore):
             query: Text query để tìm kiếm
             k: Số lượng kết quả trả về
             category: Danh mục để lọc kết quả
+            app_name: Tên app để lọc kết quả
             
         Returns:
             List[Tuple[Dict[str, Any], float]]: Danh sách kết quả và score
@@ -229,10 +235,15 @@ class ImageStore(BaseVectorStore):
         query_vector = self.embedding_function.embed_query(query)
         
         # Tạo điều kiện tìm kiếm
-        expr = None
+        expr_conditions = []
         if category != "all":
-            # Sử dụng cú pháp StringLiteral với dấu nháy đơn
-            expr = f"category == '{category}'"
+            expr_conditions.append(f"category == '{category}'")
+        if app_name != "all":
+            expr_conditions.append(f"app_name == '{app_name}'")
+        
+        expr = None
+        if expr_conditions:
+            expr = " and ".join(expr_conditions)
         
         # Thực hiện tìm kiếm
         search_params = {
@@ -249,7 +260,7 @@ class ImageStore(BaseVectorStore):
                 param=search_params,
                 limit=k,
                 expr=expr,
-                output_fields=["id", "text", "image_path", "category", "metadata"]
+                output_fields=["id", "text", "image_path", "category", "style", "app_name", "metadata"]
             )
         else:
             results = self.vectorstore.collection.search(
@@ -257,7 +268,7 @@ class ImageStore(BaseVectorStore):
                 anns_field="vector",
                 param=search_params,
                 limit=k,
-                output_fields=["id", "text", "image_path", "category", "metadata"]
+                output_fields=["id", "text", "image_path", "category", "style", "app_name", "metadata"]
             )
         
 
@@ -269,14 +280,13 @@ class ImageStore(BaseVectorStore):
                 "text": hit.entity.get("text"),
                 "image_path": hit.entity.get("image_path"),
                 "category": hit.entity.get("category"),
+                "style": hit.entity.get("style", ""),
+                "app_name": hit.entity.get("app_name", ""),
                 "metadata": hit.entity.get("metadata", {})
             }
             
             # Tính điểm số với trọng số
             score = hit.score
-            # if category != "all" and doc["category"] == category:
-            #     # Tăng điểm cho kết quả có category khớp
-            #     score *= 1.5
             
             docs_with_scores.append((doc, score))
             

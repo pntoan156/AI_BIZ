@@ -61,7 +61,8 @@ async def search_images(request: ImageSearchRequest):
     for product_name in request.product_names:
         result = await search_images_by_name(
             image_name=product_name,
-            category=request.category
+            category=request.category,
+            app_name=request.app_name
         )
         if result.results:
             # Lọc kết quả có trọng số > 0.4

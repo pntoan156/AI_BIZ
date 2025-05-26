@@ -8,6 +8,8 @@ class ImageModel(BaseModel):
     unit_name: str
     file_names: str
     category: str
+    style: Optional[str] = ""
+    app_name: Optional[str] = ""
 
 class ImageEmbedRequest(BaseModel):
     recreate_collection: bool = False
@@ -22,11 +24,14 @@ class ImageEmbedResponse(BaseModel):
 class ImageSearchRequest(BaseModel):
     product_names: List[str]
     category: Optional[str] = "all"  # Mặc định là "all" nếu không truyền
+    app_name: Optional[str] = "all"  # Mặc định là "all" nếu không truyền
     
 class ProductImageResult(BaseModel):
     product_name: str
     image_path: str
     category: str
+    style: str
+    app_name: str
     weight: float  # Thêm trường weight để lưu trọng số của kết quả
 
 class ImageSearchResponse(BaseModel):

@@ -72,11 +72,18 @@ async def process_inventory_items_in_batches(batch_size: int = 500):
         
         # Xử lý dữ liệu từng sản phẩm trong trang
         for item in page_data["Data"]:
+            # Tạo image_name bao gồm tên, đơn vị tính và style để embedding tốt hơn
+            image_name = f"{item.name} ({item.unit_name})"
+            if item.style and item.style.strip():
+                image_name += f" {item.style}"
+            
             processed_item = {
                 'image_id': item.id,
                 'image_path': item.file_names,
-                'image_name': f"{item.name} ({item.unit_name})",
-                'category': item.category
+                'image_name': image_name,
+                'category': item.category,
+                'style': item.style,
+                'app_name': item.app_name
             }
             all_processed_data.append(processed_item)
             

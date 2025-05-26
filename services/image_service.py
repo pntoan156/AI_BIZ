@@ -6,15 +6,16 @@ from models.image_models import ProductImageResult, ImageSearchResponse
 
 async def search_images_by_name(
     image_name: str,
-    category: str = "all"
+    category: str = "all",
+    app_name: str = "all"
 ) -> ImageSearchResponse:
     """
     Tìm kiếm ảnh theo tên sử dụng vector similarity
     
     Args:
         image_name: Tên ảnh cần tìm
-        limit: Số lượng kết quả trả về
         category: Danh mục để lọc kết quả
+        app_name: Tên app để lọc kết quả
         
     Returns:
         ImageSearchResponse: Kết quả tìm kiếm bao gồm danh sách kết quả với trọng số
@@ -24,7 +25,7 @@ async def search_images_by_name(
         image_store = ImageStore()
         
         # Thực hiện tìm kiếm vector similarity
-        results = image_store.hybrid_search(image_name, 4, category=category)
+        results = image_store.hybrid_search(image_name, 4, category=category, app_name=app_name)
             
         # Chuyển đổi kết quả sang định dạng response
         search_results = []
@@ -33,6 +34,8 @@ async def search_images_by_name(
                 product_name=doc.get("text", ""),  # text field contains the image name
                 image_path=doc.get("image_path", ""),
                 category=doc.get("category", ""),  # Lấy category trực tiếp từ doc
+                style=doc.get("style", ""),
+                app_name=doc.get("app_name", ""),
                 weight=float(score)  # Chuyển đổi score thành float
             )
             search_results.append(result)
@@ -69,7 +72,9 @@ async def embed_and_store_images(images_data: List[Dict], recreate_collection: b
                 "id": img_data['image_id'],
                 "image_path": img_data['image_path'],
                 "image_name": img_data['image_name'],
-                "category": img_data['category']
+                "category": img_data['category'],
+                "style": img_data['style'],
+                "app_name": img_data['app_name']
             })
         
         # Thêm vào vector store
