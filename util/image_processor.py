@@ -5,7 +5,7 @@ import aiohttp
 import io
 from typing import List, Dict, Optional
 from util.env_loader import get_env
-from models.image_models import ImageModel
+from models.image_model import ImageModel
 
 async def fetch_inventory_items(api_url: str, page_index: int = 1, page_size: int = 500) -> Dict[str, List[ImageModel]]:
     """

@@ -3,7 +3,7 @@ import time
 from dotenv import load_dotenv
 from services.image_service import search_images_by_name, embed_and_store_images
 from util.image_processor import process_inventory_items_by_chunk
-from models.image_models import (
+from models.image_model import (
     ImageSearchRequest, ImageSearchResponse,
     ImageMigrateProgressRequest, ImageMigrateProgressResponse
 )
@@ -160,6 +160,8 @@ async def search_images(request: ImageSearchRequest):
             if filtered_results:
                 # Lấy kết quả tốt nhất từ các kết quả đã lọc
                 best_match = filtered_results[0]
+                # Giữ nguyên tên sản phẩm được tìm kiếm thay vì tên trong kho
+                best_match.product_name = product_name
                 results.append(best_match)
     
     return ImageSearchResponse(results=results)

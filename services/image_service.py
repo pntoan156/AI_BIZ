@@ -2,7 +2,7 @@ import json
 import os
 from typing import Dict, Any, Optional, List, Tuple
 from stores.image_store import ImageStore
-from models.image_models import ProductImageResult, ImageSearchResponse
+from models.image_model import ProductImageResult, ImageSearchResponse
 
 async def search_images_by_name(
     image_name: str,
@@ -31,7 +31,7 @@ async def search_images_by_name(
         search_results = []
         for doc, score in results:
             result = ProductImageResult(
-                product_name=doc.get("text", ""),  # text field contains the image name
+                product_name=doc.get("text", ""),  # Sử dụng tên thực tế từ database (text field)
                 image_path=doc.get("image_path", ""),
                 category=doc.get("category", ""),  # Lấy category trực tiếp từ doc
                 style=doc.get("style", ""),
