@@ -54,6 +54,27 @@ class AiCoreEmbedding(Embeddings):
         
         return response.json()
     
+    def embed_queries(self, texts: List[str]) -> List[List[float]]:
+        """
+        Embed danh sách văn bản
+        
+        Args:
+            texts (List[str]): Danh sách văn bản cần embed
+            
+        Returns:
+            List[List[float]]: Danh sách vector embedding
+        """
+        payload = json.dumps({
+            "texts": texts,
+            "task": "retrieval.query",
+            "truncate_dim": self.truncate_dim
+        })
+        
+        response = requests.request("POST", self.api_url, headers=self.headers, data=payload)
+        response.raise_for_status()
+        
+        return response.json()
+    
     def embed_query(self, text: str) -> List[float]:
         """
         Embed câu truy vấn
@@ -76,7 +97,9 @@ class AiCoreEmbedding(Embeddings):
         # API trả về list các embedding, lấy embedding đầu tiên
         return response.json()[0]
     
-    def __call__(self, text: str) -> List[float]:
+    
+    
+    def __call__(self, text: str | List[str]) -> List[float]:
         """
         Cho phép gọi instance như một hàm để tương thích với các vector store
         
@@ -87,4 +110,9 @@ class AiCoreEmbedding(Embeddings):
             List[float]: Vector embedding
         """
         # Xử lý text đơn lẻ bằng cách gọi embed_query
-        return self.embed_query(text) 
+        if isinstance(text, str):
+            return self.embed_query(text)
+        elif isinstance(text, list):
+            return self.embed_queries(text)
+        else:
+            raise ValueError("Input phải là string hoặc list")

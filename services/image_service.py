@@ -47,13 +47,18 @@ async def search_images_by_name(
         traceback.print_exc()
         return ImageSearchResponse(results=[])
 
-async def embed_and_store_images(images_data: List[Dict], recreate_collection: bool = False):
+async def embed_and_store_images(
+    images_data: List[Dict], 
+    recreate_collection: bool = False,
+    batch_size: int = 50
+):
     """
-    Embed và lưu trữ ảnh vào vector store
+    Embed và lưu trữ ảnh vào vector store với batch processing
     
     Args:
         images_data (List[Dict]): Danh sách dữ liệu ảnh
         recreate_collection (bool): Có tạo lại collection không
+        batch_size (int): Kích thước mỗi batch để xử lý
         
     Returns:
         Dict: Kết quả xử lý
@@ -77,22 +82,28 @@ async def embed_and_store_images(images_data: List[Dict], recreate_collection: b
                 "app_name": img_data['app_name']
             })
         
-        # Thêm vào vector store
-        image_store.add_texts(texts, metadatas)
+        print(f"Bắt đầu xử lý {len(images_data)} items với batch size {batch_size}")
+        
+        # Sử dụng insert thường với batch size được chỉ định
+        processed_ids = image_store.add_texts(texts, metadatas, batch_size=batch_size)
         
         return {
             "success": True,
-            "processed_count": len(images_data),
-            "error_count": 0,
-            "total": len(images_data)
+            "processed_count": len(processed_ids),
+            "error_count": len(images_data) - len(processed_ids),
+            "total": len(images_data),
+            "method": "regular_insert"
         }
         
     except Exception as e:
         print(f"Error processing images: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {
             "success": False,
             "error": str(e),
             "processed_count": 0,
             "error_count": len(images_data),
-            "total": len(images_data)
+            "total": len(images_data),
+            "method": "failed"
         } 
