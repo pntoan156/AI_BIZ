@@ -8,7 +8,8 @@ from models.image_model import (
     ImageMigrateProgressRequest, ImageMigrateProgressResponse
 )
 
-load_dotenv()
+# Force load .env file và override system environment variables
+load_dotenv(override=True)
 
 app = FastAPI()
 

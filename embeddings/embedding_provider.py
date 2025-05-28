@@ -9,7 +9,7 @@ from embeddings.aicore_embedding import AiCoreEmbedding
 from dotenv import load_dotenv
 from util.env_loader import get_env
 
-load_dotenv()
+load_dotenv(override=True)
 
 def get_embedding_model(provider: str = None, model_params: Optional[Dict[str, Any]] = None):
     """
