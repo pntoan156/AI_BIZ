@@ -91,7 +91,7 @@ class ImageStore(BaseVectorStore):
             # Tạo ID cho các bản ghi
             ids = [metadata.get("id", str(i)) for i, metadata in enumerate(metadatas)]
             
-            print(f"Bắt đầu xử lý {len(texts)} items)
+            print(f"Bắt đầu xử lý {len(texts)} items")
             
             # Embedding tất cả texts cùng lúc theo batch
             print("Bắt đầu embedding texts...")
