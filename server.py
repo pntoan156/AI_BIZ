@@ -1,8 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 import time
 from dotenv import load_dotenv
 from services.image_service import search_images_by_name, embed_and_store_images
 from util.image_processor import process_inventory_items_by_chunk
+from workers.migration_worker import migration_worker
 from models.image_model import (
     ImageSearchRequest, ImageSearchResponse,
     ImageMigrateProgressRequest, ImageMigrateProgressResponse
@@ -13,134 +15,107 @@ load_dotenv(override=True)
 
 app = FastAPI()
 
-@app.post("/api/v1/images/migrate", response_model=ImageMigrateProgressResponse)
+@app.post("/api/v1/images/migrate")
 async def migrate_images(request: ImageMigrateProgressRequest):
     """
-    Endpoint di chuyển ảnh vào vector store
-    - Nếu max_chunks = 0: Xử lý TẤT CẢ dữ liệu tự động theo chunk
-    - Nếu max_chunks > 0: Xử lý số chunk giới hạn
-    - Hỗ trợ tiếp tục từ start_offset cụ thể
+    Endpoint di chuyển ảnh vào vector store (bất đồng bộ với worker)
     
     Args:
         request (ImageMigrateProgressRequest): Thông tin request
         
     Returns:
-        ImageMigrateProgressResponse: Phản hồi với thông tin tiến độ chi tiết
+        Dict: Job ID để theo dõi tiến độ
     """
-    start_time = time.time()
-    
     try:
-        total_processed = 0
-        total_errors = 0
-        total_records = 0
-        current_offset = request.start_offset
-        chunk_count = 0
-        total_chunks = 0
-        
-        print(f"Bắt đầu migrate từ offset {current_offset}")
-        print(f"Chunk size: {request.chunk_size}, Batch size: {request.batch_size}")
-        
-        if request.max_chunks == 0:
-            print("Chế độ: Xử lý TẤT CẢ dữ liệu")
-        else:
-            print(f"Chế độ: Xử lý tối đa {request.max_chunks} chunks")
-        
-        while True:
-            chunk_count += 1
-            print(f"\n=== CHUNK {chunk_count} - Offset: {current_offset} ===")
-            
-            # Kiểm tra giới hạn chunks
-            if request.max_chunks > 0 and chunk_count > request.max_chunks:
-                print(f"Đã đạt giới hạn {request.max_chunks} chunks, dừng xử lý")
-                break
-            
-            # Xử lý chunk hiện tại
-            chunk_result = await process_inventory_items_by_chunk(
-                chunk_size=request.chunk_size,
-                start_offset=current_offset,
-                api_batch_size=500
-            )
-            
-            # Cập nhật total_records và tính total_chunks từ chunk đầu tiên
-            if chunk_count == 1:
-                total_records = chunk_result["total_records"]
-                total_chunks = (total_records + request.chunk_size - 1) // request.chunk_size
-                if request.max_chunks > 0:
-                    total_chunks = min(total_chunks, request.max_chunks)
-                print(f"Tổng số bản ghi: {total_records}, Ước tính {total_chunks} chunks")
-            
-            # Kiểm tra nếu không còn dữ liệu
-            if not chunk_result["data"]:
-                print(f"Chunk {chunk_count}: Không có dữ liệu, kết thúc")
-                break
-            
-            print(f"Chunk {chunk_count}: Lấy được {len(chunk_result['data'])} items")
-            
-            # Embed và lưu trữ chunk hiện tại
-            embed_result = await embed_and_store_images(
-                chunk_result["data"], 
-                request.recreate_collection if chunk_count == 1 else False,  # Chỉ recreate ở chunk đầu
-                request.batch_size
-            )
-            
-            # Cập nhật thống kê
-            total_processed += embed_result["processed_count"]
-            total_errors += embed_result["error_count"]
-            
-            # Tính phần trăm tiến độ
-            progress_percentage = (total_processed / total_records * 100) if total_records > 0 else 0
-            
-            print(f"Chunk {chunk_count}: Đã xử lý {embed_result['processed_count']}/{len(chunk_result['data'])} items")
-            print(f"Tổng tiến độ: {total_processed}/{total_records} ({progress_percentage:.1f}%)")
-            
-            # Cập nhật offset cho chunk tiếp theo
-            current_offset = chunk_result["next_offset"]
-            
-            # Kiểm tra nếu đã hết dữ liệu
-            if not chunk_result["has_more"]:
-                print(f"\nHoàn thành! Đã xử lý hết {chunk_count} chunks")
-                break
-            
-            # Nghỉ 2 giây giữa các chunk để tránh quá tải
-            print("Nghỉ 2 giây trước chunk tiếp theo...")
-            time.sleep(2)
-        
-        end_time = time.time()
-        processing_time = end_time - start_time
-        
-        return ImageMigrateProgressResponse(
-            success=True,
-            message=f"Hoàn thành migrate! Đã xử lý {chunk_count} chunks, {total_processed} items thành công, {total_errors} lỗi trong {processing_time:.1f}s",
-            total_processed=total_processed,
-            total_error=total_errors,
-            total_records=total_records,
-            current_chunk=chunk_count,
-            total_chunks=total_chunks,
-            progress_percentage=(total_processed / total_records * 100) if total_records > 0 else 100,
-            next_offset=current_offset,
-            has_more=chunk_result.get("has_more", False) if 'chunk_result' in locals() else False,
-            processing_time_seconds=processing_time
-        )
-        
+        job_id = migration_worker.start_migration_job(request)
+        return {
+            "success": True,
+            "job_id": job_id,
+            "message": "Đã bắt đầu migration job. Sử dụng job_id để theo dõi tiến độ."
+        }
     except Exception as e:
-        end_time = time.time()
-        processing_time = end_time - start_time
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.get("/api/v1/images/migrate-status/{job_id}")
+async def get_migration_status(job_id: str):
+    """
+    Lấy trạng thái migration job
+    
+    Args:
+        job_id: ID của job
         
-        import traceback
-        traceback.print_exc()
-        return ImageMigrateProgressResponse(
-            success=False,
-            message=f"Lỗi trong quá trình migrate: {str(e)}",
-            total_processed=total_processed,
-            total_error=total_errors,
-            total_records=total_records,
-            current_chunk=chunk_count,
-            total_chunks=total_chunks,
-            progress_percentage=(total_processed / total_records * 100) if total_records > 0 else 0,
-            next_offset=current_offset,
-            has_more=True,
-            processing_time_seconds=processing_time
-        )
+    Returns:
+        Dict: Thông tin trạng thái job
+    """
+    job_status = migration_worker.get_job_status(job_id)
+    if not job_status:
+        raise HTTPException(status_code=404, detail="Job không tồn tại")
+    
+    # Tạo copy để không thay đổi dữ liệu gốc
+    job_status_copy = job_status.copy()
+    
+    # Format datetime cho JSON serialization
+    from datetime import datetime
+    if job_status_copy.get("start_time") and isinstance(job_status_copy["start_time"], datetime):
+        job_status_copy["start_time"] = job_status_copy["start_time"].isoformat()
+    if job_status_copy.get("end_time") and isinstance(job_status_copy["end_time"], datetime):
+        job_status_copy["end_time"] = job_status_copy["end_time"].isoformat()
+    
+    return {
+        "success": True,
+        "data": job_status_copy
+    }
+
+@app.get("/api/v1/images/migrate-jobs")
+async def get_all_migration_jobs():
+    """
+    Lấy tất cả migration jobs
+    
+    Returns:
+        Dict: Danh sách tất cả jobs
+    """
+    jobs = migration_worker.get_all_jobs()
+    
+    # Tạo copy để không thay đổi dữ liệu gốc
+    jobs_copy = {}
+    from datetime import datetime
+    
+    for job_id, job_data in jobs.items():
+        job_copy = job_data.copy()
+        # Format datetime cho JSON serialization
+        if job_copy.get("start_time") and isinstance(job_copy["start_time"], datetime):
+            job_copy["start_time"] = job_copy["start_time"].isoformat()
+        if job_copy.get("end_time") and isinstance(job_copy["end_time"], datetime):
+            job_copy["end_time"] = job_copy["end_time"].isoformat()
+        jobs_copy[job_id] = job_copy
+    
+    return {
+        "success": True,
+        "data": jobs_copy
+    }
+
+@app.post("/api/v1/images/migrate-cancel/{job_id}")
+async def cancel_migration_job(job_id: str):
+    """
+    Hủy migration job
+    
+    Args:
+        job_id: ID của job
+        
+    Returns:
+        Dict: Kết quả hủy job
+    """
+    success = migration_worker.cancel_job(job_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Job không tồn tại")
+    
+    return {
+        "success": True,
+        "message": "Đã hủy job thành công"
+    }
 
 @app.post("/api/v1/images/search-by-name", response_model=ImageSearchResponse)
 async def search_images(request: ImageSearchRequest):
