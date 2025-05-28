@@ -25,37 +25,6 @@ class ImageStore(BaseVectorStore):
             recreate_collection=recreate_collection
         )
 
-    def _check_existing_ids(self, ids: List[str]) -> Tuple[List[str], List[str]]:
-        """
-        Kiểm tra ID nào đã tồn tại trong collection
-        
-        Args:
-            ids: Danh sách ID cần kiểm tra
-            
-        Returns:
-            Tuple[List[str], List[str]]: (existing_ids, new_ids)
-        """
-        try:
-            # Tạo expression để query các ID
-            ids_str = "', '".join(ids)
-            expr = f"id in ['{ids_str}']"
-            
-            results = self.vectorstore.collection.query(
-                expr=expr,
-                output_fields=["id"],
-                limit=len(ids)
-            )
-            
-            existing_ids = [item["id"] for item in results]
-            new_ids = [id for id in ids if id not in existing_ids]
-            
-            return existing_ids, new_ids
-            
-        except Exception as e:
-            print(f"Lỗi khi kiểm tra existing IDs: {e}")
-            # Nếu có lỗi, coi như tất cả đều là ID mới
-            return [], ids
-
     def _batch_embed_texts(self, texts: List[str], batch_size: int = 100) -> List[List[float]]:
         """
         Embedding texts theo batch để tối ưu hiệu suất
@@ -104,16 +73,16 @@ class ImageStore(BaseVectorStore):
         **kwargs
     ) -> List[str]:
         """
-        Thêm văn bản vào store với batch processing và update mechanism
+        Thêm văn bản vào store với batch processing (không check existing IDs)
         
         Args:
             texts: Danh sách văn bản
             metadatas: Danh sách metadata tương ứng
-            batch_size: Kích thước mỗi batch để insert/update
+            batch_size: Kích thước mỗi batch để insert
             **kwargs: Các tham số bổ sung
             
         Returns:
-            List[str]: Danh sách ID của các văn bản đã thêm/cập nhật
+            List[str]: Danh sách ID của các văn bản đã thêm
         """
         if not metadatas:
             metadatas = [{} for _ in texts]
@@ -122,15 +91,7 @@ class ImageStore(BaseVectorStore):
             # Tạo ID cho các bản ghi
             ids = [metadata.get("id", str(i)) for i, metadata in enumerate(metadatas)]
             
-            # Kiểm tra ID nào đã tồn tại
-            existing_ids, new_ids = self._check_existing_ids(ids)
-            print(f"Tìm thấy {len(existing_ids)} ID đã tồn tại, {len(new_ids)} ID mới")
-            
-            # Xóa các bản ghi cũ nếu có
-            if existing_ids:
-                print(f"Đang xóa {len(existing_ids)} bản ghi cũ...")
-                self.delete(existing_ids)
-                time.sleep(0.5)  # Đợi xóa hoàn tất
+            print(f"Bắt đầu xử lý {len(texts)} items)
             
             # Embedding tất cả texts cùng lúc theo batch
             print("Bắt đầu embedding texts...")
