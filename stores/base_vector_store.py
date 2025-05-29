@@ -30,19 +30,6 @@ class BaseVectorStore(ABC):
         pass
     
     @abstractmethod
-    def add_documents(self, documents: List[Any], **kwargs) -> List[str]:
-        """
-        Thêm tài liệu vào vector store
-        
-        Args:
-            documents: Danh sách tài liệu cần thêm
-            
-        Returns:
-            List[str]: Danh sách ID của các tài liệu đã thêm
-        """
-        pass
-    
-    @abstractmethod
     def similarity_search(
         self, 
         query: str, 

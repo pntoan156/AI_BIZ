@@ -263,10 +263,10 @@ class MigrationWorker:
         job_id: str,
         images_data: list, 
         recreate_collection: bool = False,
-        batch_size: int = 50
+        batch_size: int = 20000  # Tăng batch_size cho mega insert
     ):
         """
-        Embed và store với kiểm tra cancel status
+        Embed và store với kiểm tra cancel status - SỬ DỤNG TRỰC TIẾP mega_insert_texts
         """
         from stores.image_store import ImageStore
         
@@ -275,128 +275,71 @@ class MigrationWorker:
         if job_status and job_status["status"] == "cancelled":
             return None
         
+        total_records = len(images_data)
+        print(f"[Job {job_id}] CÁCH 1: Mega insert trực tiếp {total_records:,} records với batch_size={batch_size:,}")
+        
+        # Auto-optimize batch size
+        if total_records < 5000:
+            batch_size = min(batch_size, 2000)
+        elif total_records > 50000:
+            batch_size = min(batch_size, 30000)
+        
         # Khởi tạo image store
         image_store = ImageStore(recreate_collection=recreate_collection)
         
         try:
-            # Chuẩn bị texts và metadata
-            texts = []
-            metadatas = []
+            # Chuẩn bị dữ liệu một lần duy nhất - tối ưu
+            texts = [img_data['image_name'] for img_data in images_data]
+            metadatas = [{
+                "id": img_data['image_id'],
+                "image_path": img_data['image_path'],
+                "image_name": img_data['image_name'],
+                "category": img_data['category'],
+                "style": img_data['style'],
+                "app_name": img_data['app_name']
+            } for img_data in images_data]
             
-            for img_data in images_data:
-                texts.append(img_data['image_name'])
-                metadatas.append({
-                    "id": img_data['image_id'],
-                    "image_path": img_data['image_path'],
-                    "image_name": img_data['image_name'],
-                    "category": img_data['category'],
-                    "style": img_data['style'],
-                    "app_name": img_data['app_name']
-                })
-            
-            print(f"[Job {job_id}] Bắt đầu xử lý {len(images_data)} items với batch size {batch_size}")
-            
-            # Kiểm tra cancel trước embedding
+            # Kiểm tra cancel sau khi prep
             job_status = self.get_job_status(job_id)
             if job_status and job_status["status"] == "cancelled":
                 return None
             
-            # Tạo ID cho các bản ghi
-            ids = [metadata.get("id", str(i)) for i, metadata in enumerate(metadatas)]
+            print(f"[Job {job_id}] mega_insert_texts - tối ưu")
             
-            print(f"[Job {job_id}] Bắt đầu embedding texts...")
-            vectors = image_store._batch_embed_texts(texts, batch_size=150)
+            # SỬ DỤNG TRỰC TIẾP mega_insert_texts - KHÔNG chia nhỏ
+            processed_ids = image_store.vectorstore.mega_insert_texts(
+                texts=texts,
+                metadatas=metadatas,
+                batch_size=batch_size
+            )
             
-            # Kiểm tra cancel sau embedding
+            # Kiểm tra cancel sau khi hoàn thành
             job_status = self.get_job_status(job_id)
             if job_status and job_status["status"] == "cancelled":
                 return None
             
-            # Xử lý insert theo batch với cancel checking
-            all_inserted_ids = []
-            total_batches = (len(texts) + batch_size - 1) // batch_size
-            
-            for i in range(0, len(texts), batch_size):
-                # Kiểm tra cancel trước mỗi batch
-                job_status = self.get_job_status(job_id)
-                if job_status and job_status["status"] == "cancelled":
-                    print(f"[Job {job_id}] Job bị hủy trong quá trình insert batch {i//batch_size + 1}")
-                    return None
-                
-                batch_texts = texts[i:i + batch_size]
-                batch_metadatas = metadatas[i:i + batch_size]
-                batch_vectors = vectors[i:i + batch_size]
-                batch_ids = ids[i:i + batch_size]
-                
-                print(f"[Job {job_id}] Đang insert batch {i//batch_size + 1}/{total_batches} ({len(batch_texts)} items)")
-                
-                # Chuẩn bị dữ liệu cho batch hiện tại
-                batch_data = []
-                for j, (text, metadata, vector, image_id) in enumerate(zip(batch_texts, batch_metadatas, batch_vectors, batch_ids)):
-                    record = {
-                        "id": image_id,
-                        "vector": vector,
-                        "text": text,
-                        "image_path": metadata.get("image_path", ""),
-                        "category": metadata.get("category", ""),
-                        "style": metadata.get("style", ""),
-                        "app_name": metadata.get("app_name", ""),
-                        "metadata": metadata
-                    }
-                    batch_data.append(record)
-                
-                # Insert batch vào collection
-                try:
-                    insert_result = image_store.vectorstore.collection.insert(batch_data)
-                    all_inserted_ids.extend(batch_ids)
-                    
-                    # Flush sau mỗi batch
-                    image_store.vectorstore.collection.flush()
-                    print(f"[Job {job_id}] Đã insert thành công batch {i//batch_size + 1}")
-                    
-                    # Kiểm tra cancel trước khi nghỉ
-                    if i + batch_size < len(texts):
-                        job_status = self.get_job_status(job_id)
-                        if job_status and job_status["status"] == "cancelled":
-                            print(f"[Job {job_id}] Job bị hủy trước khi nghỉ giữa batch")
-                            return None
-                        
-                        print(f"[Job {job_id}] Nghỉ 0.5 giây trước batch tiếp theo...")
-                        time.sleep(0.5)
-                        
-                except Exception as batch_error:
-                    print(f"[Job {job_id}] Lỗi khi insert batch {i//batch_size + 1}: {batch_error}")
-                    # Thử insert từng item trong batch
-                    for k, record in enumerate(batch_data):
-                        try:
-                            image_store.vectorstore.collection.insert([record])
-                            all_inserted_ids.append(batch_ids[k])
-                        except Exception as item_error:
-                            print(f"[Job {job_id}] Lỗi khi insert item {batch_ids[k]}: {item_error}")
-                    
-                    image_store.vectorstore.collection.flush()
-            
-            print(f"[Job {job_id}] Hoàn thành! Đã xử lý {len(all_inserted_ids)}/{len(texts)} items")
+            print(f"[Job {job_id}] hoàn thành: {len(processed_ids):,}/{total_records:,} records")
             
             return {
                 "success": True,
-                "processed_count": len(all_inserted_ids),
-                "error_count": len(images_data) - len(all_inserted_ids),
-                "total": len(images_data),
-                "method": "worker_insert_with_cancel_check"
+                "processed_count": len(processed_ids),
+                "error_count": total_records - len(processed_ids),
+                "total": total_records,
+                "method": "mega_insert_direct_optimized",
+                "batch_size": batch_size
             }
             
         except Exception as e:
-            print(f"[Job {job_id}] Error processing images: {str(e)}")
+            print(f"[Job {job_id}] Error trong CÁCH 1: {str(e)}")
             import traceback
             traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e),
                 "processed_count": 0,
-                "error_count": len(images_data),
-                "total": len(images_data),
-                "method": "failed"
+                "error_count": total_records,
+                "total": total_records,
+                "method": "mega_insert_direct_failed"
             }
 
 # Singleton instance

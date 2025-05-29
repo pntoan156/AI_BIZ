@@ -25,55 +25,15 @@ class ImageStore(BaseVectorStore):
             recreate_collection=recreate_collection
         )
 
-    def _batch_embed_texts(self, texts: List[str], batch_size: int = 100) -> List[List[float]]:
-        """
-        Embedding texts theo batch để tối ưu hiệu suất
-        
-        Args:
-            texts: Danh sách văn bản cần embedding
-            batch_size: Kích thước mỗi batch
-            
-        Returns:
-            List[List[float]]: Danh sách vectors
-        """
-        all_vectors = []
-        
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i + batch_size]
-            print(f"Đang embedding batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
-            
-            try:
-                # Sử dụng embed_documents để embedding cả batch
-                batch_vectors = self.embedding_function(batch_texts)
-                all_vectors.extend(batch_vectors)
-                
-                # Nghỉ ngắn giữa các batch để tránh quá tải API
-                if i + batch_size < len(texts):
-                    time.sleep(0.1)
-                    
-            except Exception as e:
-                print(f"Lỗi khi embedding batch {i//batch_size + 1}: {e}")
-                # Fallback về embedding từng text
-                for text in batch_texts:
-                    try:
-                        vector = self.embedding_function(text)
-                        all_vectors.append(vector)
-                    except Exception as text_error:
-                        print(f"Lỗi khi embedding text: {text_error}")
-                        # Tạo vector zero nếu không thể embedding
-                        all_vectors.append([0.0] * 768)
-        
-        return all_vectors
-
     def add_texts(
         self,
         texts: List[str],
         metadatas: Optional[List[Dict[str, Any]]] = None,
-        batch_size: int = 50,
+        batch_size: int = 2000,  # Tăng batch size
         **kwargs
     ) -> List[str]:
         """
-        Thêm văn bản vào store với batch processing (không check existing IDs)
+        Thêm văn bản vào store với batch processing tối ưu (loại bỏ trùng lặp)
         
         Args:
             texts: Danh sách văn bản
@@ -88,91 +48,25 @@ class ImageStore(BaseVectorStore):
             metadatas = [{} for _ in texts]
             
         try:
-            # Tạo ID cho các bản ghi
-            ids = [metadata.get("id", str(i)) for i, metadata in enumerate(metadatas)]
+            print(f"Bắt đầu xử lý {len(texts)} items với batch_size={batch_size}")
             
-            print(f"Bắt đầu xử lý {len(texts)} items")
+            # Sử dụng phương thức tối ưu từ vectorstore thay vì insert trực tiếp
+            # Điều này sẽ sử dụng schema đã được tối ưu và tránh trùng lặp dữ liệu
+            ids = self.vectorstore.bulk_insert_texts(
+                texts=texts,
+                metadatas=metadatas,
+                batch_size=batch_size,
+                **kwargs
+            )
             
-            # Embedding tất cả texts cùng lúc theo batch
-            print("Bắt đầu embedding texts...")
-            vectors = self._batch_embed_texts(texts, batch_size=150)  # Batch nhỏ hơn cho embedding
-            
-            # Xử lý insert theo batch
-            all_inserted_ids = []
-            total_batches = (len(texts) + batch_size - 1) // batch_size
-            
-            for i in range(0, len(texts), batch_size):
-                batch_texts = texts[i:i + batch_size]
-                batch_metadatas = metadatas[i:i + batch_size]
-                batch_vectors = vectors[i:i + batch_size]
-                batch_ids = ids[i:i + batch_size]
-                
-                print(f"Đang insert batch {i//batch_size + 1}/{total_batches} ({len(batch_texts)} items)")
-                
-                # Chuẩn bị dữ liệu cho batch hiện tại
-                batch_data = []
-                for j, (text, metadata, vector, image_id) in enumerate(zip(batch_texts, batch_metadatas, batch_vectors, batch_ids)):
-                    record = {
-                        "id": image_id,
-                        "vector": vector,
-                        "text": text,
-                        "image_path": metadata.get("image_path", ""),
-                        "category": metadata.get("category", ""),
-                        "style": metadata.get("style", ""),
-                        "app_name": metadata.get("app_name", ""),
-                        "metadata": metadata
-                    }
-                    batch_data.append(record)
-                
-                # Insert batch vào collection
-                try:
-                    insert_result = self.vectorstore.collection.insert(batch_data)
-                    all_inserted_ids.extend(batch_ids)
-                    
-                    # Flush sau mỗi batch
-                    self.vectorstore.collection.flush()
-                    print(f"Đã insert thành công batch {i//batch_size + 1}")
-                    
-                    # Nghỉ 1 giây trước khi xử lý batch tiếp theo
-                    if i + batch_size < len(texts):
-                        print("Nghỉ 1 giây trước batch tiếp theo...")
-                        time.sleep(0.5)
-                        
-                except Exception as batch_error:
-                    print(f"Lỗi khi insert batch {i//batch_size + 1}: {batch_error}")
-                    # Thử insert từng item trong batch
-                    for k, record in enumerate(batch_data):
-                        try:
-                            self.vectorstore.collection.insert([record])
-                            all_inserted_ids.append(batch_ids[k])
-                        except Exception as item_error:
-                            print(f"Lỗi khi insert item {batch_ids[k]}: {item_error}")
-                    
-                    self.vectorstore.collection.flush()
-            
-            print(f"Hoàn thành! Đã xử lý {len(all_inserted_ids)}/{len(texts)} items")
-            return all_inserted_ids
+            print(f"Hoàn thành! Đã xử lý {len(ids)} items")
+            return ids
             
         except Exception as e:
             print(f"Lỗi khi thêm texts: {str(e)}")
             if "422" in str(e):
                 print("Lỗi API embedding - kiểm tra lại URL và API key")
             raise
-
-    def add_documents(self, documents: List[Any], **kwargs) -> List[str]:
-        """
-        Thêm tài liệu vào store
-        
-        Args:
-            documents: Danh sách tài liệu
-            **kwargs: Các tham số bổ sung
-            
-        Returns:
-            List[str]: Danh sách ID của các tài liệu đã thêm
-        """
-        texts = [doc.page_content for doc in documents]
-        metadatas = [doc.metadata for doc in documents]
-        return self.add_texts(texts, metadatas, **kwargs)
 
     def delete(self, ids: List[str]) -> None:
         """
@@ -303,7 +197,7 @@ class ImageStore(BaseVectorStore):
         app_name: str = "all"
     ) -> List[Tuple[Dict[str, Any], float]]:
         """
-        Tìm kiếm similarity dựa trên text query
+        Tìm kiếm similarity dựa trên text query (sử dụng phương thức tối ưu)
         
         Args:
             query: Text query để tìm kiếm
@@ -314,68 +208,39 @@ class ImageStore(BaseVectorStore):
         Returns:
             List[Tuple[Dict[str, Any], float]]: Danh sách kết quả và score
         """
-        # Tạo vector từ query
-        query_vector = self.embedding_function.embed_query(query)
-        
-        # Tạo điều kiện tìm kiếm
-        expr_conditions = []
-        if category != "all":
-            expr_conditions.append(f"category == '{category}'")
-        if app_name != "all":
-            expr_conditions.append(f"app_name == '{app_name}'")
-        
-        expr = None
-        if expr_conditions:
-            expr = " and ".join(expr_conditions)
-        
-        # Thực hiện tìm kiếm
-        search_params = {
-            "metric_type": "COSINE",
-            "params": {"ef": 64}
-        }
-        
-        print(f"Executing search with expr: {expr}")  # Debug log
-        
-        if expr:
-            results = self.vectorstore.collection.search(
-                data=[query_vector],
-                anns_field="vector",
-                param=search_params,
-                limit=k,
-                expr=expr,
-                output_fields=["id", "text", "image_path", "category", "style", "app_name", "metadata"]
-            )
-        else:
-            results = self.vectorstore.collection.search(
-                data=[query_vector],
-                anns_field="vector",
-                param=search_params,
-                limit=k,
-                output_fields=["id", "text", "image_path", "category", "style", "app_name", "metadata"]
-            )
-        
-
-        # Format kết quả và tính toán điểm số
-        docs_with_scores = []
-        for hit in results[0]:
-            doc = {
-                "id": hit.entity.get("id"),
-                "text": hit.entity.get("text"),
-                "image_path": hit.entity.get("image_path"),
-                "category": hit.entity.get("category"),
-                "style": hit.entity.get("style", ""),
-                "app_name": hit.entity.get("app_name", ""),
-                "metadata": hit.entity.get("metadata", {})
-            }
+        try:
+            # Sử dụng phương thức similarity_search tối ưu từ vectorstore
+            results = self.vectorstore.similarity_search(query, k=k)
             
-            # Tính điểm số với trọng số
-            score = hit.score
+            # Filter theo category và app_name nếu cần
+            filtered_results = []
+            for doc, score in results:
+                metadata = doc.get("metadata", {})
+                
+                # Kiểm tra điều kiện lọc
+                if category != "all" and metadata.get("category") != category:
+                    continue
+                if app_name != "all" and metadata.get("app_name") != app_name:
+                    continue
+                
+                # Format lại kết quả để tương thích
+                formatted_doc = {
+                    "id": doc.get("id"),
+                    "text": doc.get("text"),
+                    "image_path": metadata.get("image_path", ""),
+                    "category": metadata.get("category", ""),
+                    "style": metadata.get("style", ""),
+                    "app_name": metadata.get("app_name", ""),
+                    "metadata": metadata
+                }
+                
+                filtered_results.append((formatted_doc, score))
             
-            docs_with_scores.append((doc, score))
+            return filtered_results[:k]
             
-        return docs_with_scores
-        
-        raise
+        except Exception as e:
+            print(f"Lỗi khi thực hiện similarity search: {e}")
+            return []
 
     def get_collection_info(self) -> Dict[str, Any]:
         """

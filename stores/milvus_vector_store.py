@@ -150,6 +150,74 @@ class MilvusVectorStore(BaseVectorStore):
         print("Warning: Không thể xác định số chiều vector từ embedding_function.")
         return -1 # Hoặc một giá trị mặc định khác / raise error
     
+    def _create_optimized_index(self, field_name: str = "vector") -> None:
+        """
+        Tạo index tối ưu cho vector field - SINGLE SOURCE OF TRUTH
+        
+        Args:
+            field_name: Tên field cần đánh index (mặc định "vector")
+        """
+        # Tham số index tối ưu duy nhất - KHÔNG duplicate nữa
+        index_params = {
+            "metric_type": "COSINE", 
+            "index_type": "HNSW", 
+            "params": {
+                "M": 16,             # Tối ưu cho chất lượng và hiệu suất
+                "efConstruction": 200 # Tối ưu để giảm phân mảnh
+            }
+        }
+        
+        try:
+            self.collection.create_index(field_name, index_params)
+            print(f"✅ Đã tạo index tối ưu cho field '{field_name}' (M=16, efConstruction=200)")
+        except Exception as e:
+            print(f"❌ Lỗi khi tạo index cho '{field_name}': {e}")
+            raise
+    
+    def _batch_embed_texts(self, texts: List[str], embedding_batch_size: int = 200) -> List[List[float]]:
+        """
+        Batch embedding với sub-batches để tránh quá tải API
+        
+        Args:
+            texts: Danh sách texts cần embed
+            embedding_batch_size: Kích thước sub-batch (mặc định 200)
+            
+        Returns:
+            List[List[float]]: Danh sách vectors
+        """
+        import time  # Import time module
+        
+        if not texts:
+            return []
+            
+        if len(texts) == 1:
+            # Single text
+            return [self.embedding_function(texts[0])]
+        
+        # Batch embedding với sub-batches
+        all_vectors = []
+        total_sub_batches = (len(texts) + embedding_batch_size - 1) // embedding_batch_size
+        
+        print(f"      🧠 Chia thành {total_sub_batches} sub-batches ({embedding_batch_size} records/batch)...")
+        
+        for sub_i in range(0, len(texts), embedding_batch_size):
+            sub_batch_texts = texts[sub_i:sub_i + embedding_batch_size]
+            sub_batch_num = (sub_i // embedding_batch_size) + 1
+            
+            sub_start = time.time()
+            print(f"         🔄 Sub-batch {sub_batch_num}/{total_sub_batches}: {len(sub_batch_texts)} texts...")
+            
+            # Gọi embedding cho sub-batch
+            sub_vectors = self.embedding_function(sub_batch_texts)
+            all_vectors.extend(sub_vectors)
+            
+            sub_time = time.time() - sub_start
+            sub_progress = (sub_batch_num / total_sub_batches) * 100
+            sub_speed = len(sub_batch_texts) / sub_time if sub_time > 0 else 0
+            
+            print(f"         ✅ Sub-batch {sub_batch_num} hoàn thành ({sub_progress:.0f}%) - {sub_time:.1f}s - {sub_speed:.0f} texts/s")
+        
+        return all_vectors
     
     def _init_inventory_item_collection(self) -> None:
         """
@@ -179,15 +247,8 @@ class MilvusVectorStore(BaseVectorStore):
             print(f"Lỗi khi tạo collection '{self.collection_name}': {e}")
             raise # Ném lại lỗi để dừng quá trình nếu không tạo được collection
 
-        # Tạo index cho các trường vector có trong schema
-        index_params = {"metric_type": "COSINE", "index_type": "HNSW", "params": {"M": 8, "efConstruction": 64}}
-
-        # Tạo index cho trường vector
-        try:
-            self.collection.create_index("vector", index_params)
-            print("Đã tạo index cho trường 'vector'.")
-        except Exception as e:
-            print(f"Lỗi khi tạo index cho 'vector': {e}")
+        # SỬ DỤNG METHOD DUY NHẤT để tạo index
+        self._create_optimized_index("vector")
 
         # Load collection vào memory sau khi tạo index
         print(f"Đang load collection '{self.collection_name}'...")
@@ -251,127 +312,229 @@ class MilvusVectorStore(BaseVectorStore):
                  # Có thể raise lỗi ở đây nếu trường text vector là bắt buộc
                  text_dim = 768 # Hoặc một giá trị mặc định an toàn khác
 
-        # --- Định nghĩa schema dựa trên tên collection ---
+        # --- Định nghĩa schema tối ưu ---
         fields = []
-        is_image_collection = (self.collection_name == "image_collection")
 
-        # Trường ID luôn có
-        fields.append(FieldSchema(name=self.id_field, dtype=DataType.VARCHAR, is_primary=True, max_length=300))
+        # Trường ID với kích thước hợp lý
+        fields.append(FieldSchema(name=self.id_field, dtype=DataType.VARCHAR, is_primary=True, max_length=36))
 
-        # Thêm trường text và vector cho tất cả collection
-        fields.append(FieldSchema(name=self.text_field, dtype=DataType.VARCHAR, max_length=65535))
+        # Trường text với kích thước hợp lý hơn
+        fields.append(FieldSchema(name=self.text_field, dtype=DataType.VARCHAR, max_length=1000))
+        
+        # Vector field
         fields.append(FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=text_dim))
 
-        # Thêm các trường cơ bản
-        fields.append(FieldSchema(name="image_path", dtype=DataType.VARCHAR, max_length=65535))
-        fields.append(FieldSchema(name="category", dtype=DataType.VARCHAR, max_length=100))
-        fields.append(FieldSchema(name="style", dtype=DataType.VARCHAR, max_length=100))
-        fields.append(FieldSchema(name="app_name", dtype=DataType.VARCHAR, max_length=100))
+        # Chỉ thêm metadata JSON duy nhất - loại bỏ các trường dư thừa
         fields.append(FieldSchema(name="metadata", dtype=DataType.JSON, is_nullable=True))
 
-        # Thêm các trường metadata được định nghĩa trong metadata_fields (thường là 'metadata' JSON)
+        # Chỉ thêm các trường metadata từ metadata_fields nếu không trùng với 'metadata'
         for field_name, field_type in self.metadata_fields:
-            # Đảm bảo không trùng tên với các trường đã định nghĩa ở trên
-            defined_field_names = [f.name for f in fields]
-            if field_name not in defined_field_names:
-                 # Cần kiểm tra field_type là DataType hợp lệ
-                 # Chuyển đổi string thành DataType nếu cần (ví dụ: "JSON" -> DataType.JSON)
-                 actual_field_type = field_type
-                 if isinstance(field_type, str):
-                      try:
-                           actual_field_type = getattr(DataType, field_type.upper())
-                      except AttributeError:
-                           print(f"Warning: Kiểu dữ liệu metadata không hợp lệ '{field_type}' cho trường '{field_name}'. Bỏ qua.")
-                           continue # Bỏ qua field này
+            if field_name != "metadata":  # Tránh trùng lặp
+                defined_field_names = [f.name for f in fields]
+                if field_name not in defined_field_names:
+                     actual_field_type = field_type
+                     if isinstance(field_type, str):
+                          try:
+                               actual_field_type = getattr(DataType, field_type.upper())
+                          except AttributeError:
+                               print(f"Warning: Kiểu dữ liệu metadata không hợp lệ '{field_type}' cho trường '{field_name}'. Bỏ qua.")
+                               continue
 
-                 if isinstance(actual_field_type, DataType):
-                     # Xử lý VARCHAR cần max_length
-                     if actual_field_type == DataType.VARCHAR:
-                          # Có thể cho phép tùy chỉnh max_length qua kwargs nếu cần
-                          fields.append(FieldSchema(name=field_name, dtype=actual_field_type, max_length=65535))
-                     else:
-                          fields.append(FieldSchema(name=field_name, dtype=actual_field_type))
-                 else:
-                      print(f"Warning: Kiểu dữ liệu metadata không hợp lệ '{actual_field_type}' cho trường '{field_name}'. Bỏ qua.")
-
+                     if isinstance(actual_field_type, DataType):
+                         if actual_field_type == DataType.VARCHAR:
+                              fields.append(FieldSchema(name=field_name, dtype=actual_field_type, max_length=1024))  # Giảm max_length
+                         else:
+                              fields.append(FieldSchema(name=field_name, dtype=actual_field_type))
 
         # Tạo schema và collection
         try:
-            schema = CollectionSchema(fields, enable_dynamic_field=False) # Không bật dynamic field trừ khi thực sự cần
+            schema = CollectionSchema(fields, enable_dynamic_field=False)
             self.collection = Collection(self.collection_name, schema)
-            print(f"Đã tạo collection '{self.collection_name}' với schema.")
+            print(f"Đã tạo collection '{self.collection_name}' với schema tối ưu.")
         except Exception as e:
             print(f"Lỗi khi tạo collection '{self.collection_name}': {e}")
-            raise # Ném lại lỗi để dừng quá trình nếu không tạo được collection
+            raise
 
-        # Tạo index cho các trường vector có trong schema
-        index_params = {"metric_type": "COSINE", "index_type": "HNSW", "params": {"M": 8, "efConstruction": 64}}
+        # SỬ DỤNG METHOD DUY NHẤT để tạo index
+        self._create_optimized_index("vector")
 
-        # Tạo index cho trường vector
-        try:
-            self.collection.create_index("vector", index_params)
-            print("Đã tạo index cho trường 'vector'.")
-        except Exception as e:
-            print(f"Lỗi khi tạo index cho 'vector': {e}")
-
-        # Load collection vào memory sau khi tạo index
-        print(f"Đang load collection '{self.collection_name}'...")
-        self.collection.load()
-        print(f"Collection '{self.collection_name}' đã được load.")
-        
+        # KHÔNG load collection ngay - sẽ load sau khi insert xong
+        print(f"Collection '{self.collection_name}' đã được tạo. Sẽ load sau khi insert dữ liệu.")
+    
     def add_texts(
         self, 
         texts: List[str], 
         metadatas: Optional[List[Dict[str, Any]]] = None,
+        batch_size: int = 5000,  # Tăng batch_size mặc định
+        auto_flush: bool = True,  # Thêm tham số auto_flush
         **kwargs
     ) -> List[str]:
         """
-        Thêm văn bản và metadata vào vector store
+        Thêm văn bản và metadata vào vector store với batch processing tối ưu
         
         Args:
             texts: Danh sách các văn bản cần thêm
             metadatas: Danh sách metadata tương ứng với mỗi văn bản
+            batch_size: Kích thước batch để insert (mặc định 5000)
+            auto_flush: Có tự động flush sau khi insert không (mặc định True)
             
         Returns:
             List[str]: Danh sách ID của các văn bản đã thêm
         """
+        import time
+        start_time = time.time()
+        
+        print(f"🚀 Bắt đầu add_texts: {len(texts):,} records với batch_size={batch_size:,}")
+        
         # Tạo ID nếu không được cung cấp
-        ids = kwargs.get("ids", [str(i) for i in range(len(texts))])
+        ids = kwargs.get("ids", [str(uuid.uuid4()) for _ in range(len(texts))])
         
         # Tạo metadata nếu không được cung cấp
         if metadatas is None:
             metadatas = [{} for _ in texts]
         
-        # Tạo vectors từ texts
-        vectors = [self.embedding_function(text) for text in texts]
+        # Đảm bảo collection đã được load
+        collection_load_start = time.time()
+        if not hasattr(self.collection, '_loaded') or not self.collection._loaded:
+            try:
+                self.collection.load()
+                print(f"Đã load collection '{self.collection_name}' để insert dữ liệu.")
+            except Exception as e:
+                print(f"Warning: Không thể load collection: {e}")
+        collection_load_time = time.time() - collection_load_start
         
-        # Chuẩn bị dữ liệu để chèn
-        data = [
-            ids,                   # ID field
-            texts,                 # Text field
-            vectors,               # Vector field
-            metadatas,             # Metadata field
-        ]
+        all_ids = []
+        total_batches = (len(texts) + batch_size - 1) // batch_size
+        embedding_time = 0
+        insert_time = 0
         
-        # Chèn dữ liệu vào collection
-        insert_result = self.collection.insert(data)
-        self.collection.flush()
-        
-        return ids
-    
-    def add_documents(self, documents: List[Any], **kwargs) -> List[str]:
-        """
-        Thêm tài liệu vào vector store
-        
-        Args:
-            documents: Danh sách tài liệu cần thêm
+        # Insert theo batch để tối ưu hiệu suất
+        for i in range(0, len(texts), batch_size):
+            batch_num = i // batch_size + 1
+            batch_texts = texts[i:i + batch_size]
+            batch_metadatas = metadatas[i:i + batch_size]
+            batch_ids = ids[i:i + batch_size]
             
-        Returns:
-            List[str]: Danh sách ID của các tài liệu đã thêm
-        """
-        texts = [doc.page_content for doc in documents]
-        metadatas = [doc.metadata for doc in documents]
-        return self.add_texts(texts, metadatas, **kwargs)
+            # Progress info
+            progress = (batch_num / total_batches) * 100
+            print(f"\n📦 BATCH {batch_num}/{total_batches} ({progress:.1f}%)")
+            print(f"   📍 Processing: {i+1:,} → {min(i+len(batch_texts), len(texts)):,} của {len(texts):,}")
+            
+            # Đo thời gian embedding - WITH BATCH EMBEDDING
+            embedding_start = time.time()
+            print(f"   🧠 Batch embedding {len(batch_texts):,} texts...")
+            
+            # SỬ DỤNG BATCH EMBEDDING - NHANH HƠN NHIỀU LẦN!
+            try:
+                # Sử dụng helper method để batch embed
+                batch_vectors = self._batch_embed_texts(batch_texts, embedding_batch_size=400)
+                print(f"   ✅ BATCH EMBEDDING thành công ({len(batch_vectors)} vectors)!")
+                    
+            except Exception as batch_error:
+                print(f"   ⚠️  Batch embedding failed: {batch_error}, fallback to single...")
+                # Fallback về single embedding
+                batch_vectors = []
+                embedding_checkpoint = max(1, len(batch_texts) // 5)
+                
+                for j, text in enumerate(batch_texts):
+                    vector = self.embedding_function(text)
+                    batch_vectors.append(vector)
+                    
+                    if (j + 1) % embedding_checkpoint == 0 or j == len(batch_texts) - 1:
+                        embed_progress = ((j + 1) / len(batch_texts)) * 100
+                        embed_elapsed = time.time() - embedding_start
+                        embed_speed = (j + 1) / embed_elapsed if embed_elapsed > 0 else 0
+                        
+                        print(f"      📊 {j+1:,}/{len(batch_texts):,} ({embed_progress:.0f}%) | "
+                              f"Speed: {embed_speed:.0f}/s")
+            
+            batch_embedding_time = time.time() - embedding_start
+            embedding_time += batch_embedding_time
+            embedding_speed = len(batch_texts) / batch_embedding_time if batch_embedding_time > 0 else 0
+            
+            print(f"   ✅ Embedding: {batch_embedding_time:.2f}s ({embedding_speed:.0f} texts/s)")
+            
+            # Chuẩn bị dữ liệu để chèn (chỉ các trường cần thiết)
+            data_prep_start = time.time()
+            print(f"   🔧 Chuẩn bị insert data...")
+            data = [
+                batch_ids,           # ID field
+                batch_texts,         # Text field  
+                batch_vectors,       # Vector field
+                batch_metadatas,     # Metadata field
+            ]
+            data_prep_time = time.time() - data_prep_start
+            print(f"   ✅ Data prep: {data_prep_time:.3f}s")
+            
+            # Đo thời gian insert - WITH DETAILED LOGGING
+            insert_start = time.time()
+            print(f"   💾 Inserting {len(batch_texts):,} records...")
+            try:
+                insert_result = self.collection.insert(data)
+                all_ids.extend(batch_ids)
+                batch_insert_time = time.time() - insert_start
+                insert_time += batch_insert_time
+                
+                # Insert performance details
+                insert_speed = len(batch_texts) / batch_insert_time if batch_insert_time > 0 else 0
+                data_size_mb = (len(batch_texts) * 1000) / (1024 * 1024)  # Rough estimate
+                
+                print(f"   ✅ Insert: {batch_insert_time:.2f}s ({insert_speed:.0f} rec/s)")
+                print(f"      📊 ~{data_size_mb:.1f}MB | IDs: {len(insert_result.primary_keys):,}")
+                
+                # Batch summary
+                batch_total_time = batch_embedding_time + batch_insert_time + data_prep_time
+                records_per_sec = len(batch_texts) / batch_total_time if batch_total_time > 0 else 0
+                
+                print(f"   🎯 BATCH TOTAL: {batch_total_time:.2f}s | Speed: {records_per_sec:.0f} rec/s")
+                print(f"      📈 Progress: {len(all_ids):,}/{len(texts):,} completed")
+                
+                # ETA calculation
+                if batch_num > 1:
+                    avg_batch_time = (embedding_time + insert_time) / batch_num
+                    remaining_batches = total_batches - batch_num
+                    eta_seconds = remaining_batches * avg_batch_time
+                    eta_minutes = eta_seconds / 60
+                    
+                    print(f"      🕐 ETA: {eta_minutes:.1f} phút")
+                    
+                    # Mini progress bar
+                    bar_length = 20
+                    filled = int(bar_length * progress / 100)
+                    bar = '█' * filled + '░' * (bar_length - filled)
+                    print(f"      📊 [{bar}] {progress:.1f}%")
+                
+            except Exception as e:
+                print(f"   ❌ Lỗi insert batch {batch_num}: {e}")
+                raise
+        
+        # Đo thời gian flush
+        flush_start = time.time()
+        if auto_flush:
+            try:
+                self.collection.flush()
+                flush_time = time.time() - flush_start
+                print(f"✅ Đã flush {len(all_ids):,} records trong {flush_time:.2f}s")
+            except Exception as e:
+                print(f"Warning: Lỗi khi flush: {e}")
+        else:
+            flush_time = 0
+        
+        # Tính tổng thời gian và thống kê
+        total_time = time.time() - start_time
+        overall_speed = len(all_ids) / total_time
+        
+        print(f"🎉 Hoàn thành add_texts!")
+        print(f"📊 THỐNG KÊ HIỆU SUẤT:")
+        print(f"   📝 Records: {len(all_ids):,}/{len(texts):,}")
+        print(f"   ⏰ Tổng thời gian: {total_time:.2f}s")
+        print(f"   🔄 Collection load: {collection_load_time:.2f}s")
+        print(f"   🧠 Embedding: {embedding_time:.2f}s ({embedding_time/total_time*100:.1f}%)")
+        print(f"   💾 Insert: {insert_time:.2f}s ({insert_time/total_time*100:.1f}%)")
+        print(f"   🚀 Flush: {flush_time:.2f}s ({flush_time/total_time*100:.1f}%)")
+        print(f"   ⚡ Tốc độ: {overall_speed:.0f} records/second")
+        
+        return all_ids
     
     def similarity_search(
         self, 
@@ -548,3 +711,286 @@ class MilvusVectorStore(BaseVectorStore):
         }
         
         return stats
+
+    def optimize_collection(self) -> None:
+        """
+        Tối ưu hóa collection sau khi insert dữ liệu xong
+        - Compact để giảm phân mảnh
+        - Rebuild index nếu cần
+        """
+        try:
+            print(f"Đang tối ưu hóa collection '{self.collection_name}'...")
+            
+            # Flush để đảm bảo tất cả dữ liệu đã được ghi
+            self.collection.flush()
+            
+            # Compact để giảm phân mảnh
+            self.collection.compact()
+            print("Đã thực hiện compact collection.")
+            
+            # Kiểm tra và rebuild index nếu cần
+            index_info = self.collection.indexes
+            if index_info:
+                print("Index đã tồn tại, không cần rebuild.")
+            else:
+                print("Đang rebuild index...")
+                # SỬ DỤNG METHOD DUY NHẤT để tạo index
+                self._create_optimized_index("vector")
+            
+            # Load collection để sử dụng
+            self.collection.load()
+            print(f"Collection '{self.collection_name}' đã được tối ưu hóa và load.")
+            
+        except Exception as e:
+            print(f"Lỗi khi tối ưu hóa collection: {e}")
+
+    def bulk_insert_texts(
+        self, 
+        texts: List[str], 
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        batch_size: int = 10000,  # Tăng batch size cho bulk insert
+        **kwargs
+    ) -> List[str]:
+        """
+        Insert hàng loạt với tối ưu hóa cao nhất
+        
+        Args:
+            texts: Danh sách văn bản
+            metadatas: Danh sách metadata
+            batch_size: Kích thước batch (mặc định 10000)
+            
+        Returns:
+            List[str]: Danh sách ID đã insert
+        """
+        import time
+        start_time = time.time()
+        
+        print(f"🚀 Bắt đầu BULK INSERT: {len(texts):,} records với batch_size={batch_size:,}")
+        
+        # Insert tất cả batch mà không flush
+        insert_start = time.time()
+        all_ids = self.add_texts(
+            texts=texts, 
+            metadatas=metadatas, 
+            batch_size=batch_size,
+            auto_flush=False,  # Không flush từng batch
+            **kwargs
+        )
+        insert_time = time.time() - insert_start
+        
+        # Flush một lần duy nhất ở cuối
+        flush_start = time.time()
+        print("🔄 Đang flush tất cả dữ liệu...")
+        self.collection.flush()
+        flush_time = time.time() - flush_start
+        
+        # Tối ưu hóa collection
+        optimize_start = time.time()
+        print("⚡ Đang tối ưu hóa collection...")
+        self.optimize_collection()
+        optimize_time = time.time() - optimize_start
+        
+        # Tính tổng thời gian
+        total_time = time.time() - start_time
+        overall_speed = len(all_ids) / total_time
+        
+        print(f"🎉 HOÀN THÀNH BULK INSERT!")
+        print(f"📊 THỐNG KÊ TỔNG QUAN:")
+        print(f"   📝 Records: {len(all_ids):,}")
+        print(f"   ⏰ Tổng thời gian: {total_time:.2f}s")
+        print(f"   💾 Insert + Embedding: {insert_time:.2f}s ({insert_time/total_time*100:.1f}%)")
+        print(f"   🚀 Final Flush: {flush_time:.2f}s ({flush_time/total_time*100:.1f}%)")
+        print(f"   ⚙️  Optimization: {optimize_time:.2f}s ({optimize_time/total_time*100:.1f}%)")
+        print(f"   ⚡ Tốc độ tổng: {overall_speed:.0f} records/second")
+        
+        return all_ids
+
+    def mega_insert_texts(
+        self, 
+        texts: List[str], 
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        batch_size: int = 50000,  # Batch rất lớn cho mega insert
+        **kwargs
+    ) -> List[str]:
+        """
+        Insert siêu lớn cho hàng triệu bản ghi với tối ưu hóa tối đa
+        
+        Args:
+            texts: Danh sách văn bản
+            metadatas: Danh sách metadata  
+            batch_size: Kích thước batch (mặc định 50,000)
+            
+        Returns:
+            List[str]: Danh sách ID đã insert
+        """
+        import time
+        start_time = time.time()
+        
+        total_records = len(texts)
+        print(f"🚀 Bắt đầu MEGA INSERT {total_records:,} records với batch_size={batch_size:,}")
+        
+        if total_records > 1000000:  # > 1 triệu
+            print("⚠️  CẢNH BÁO: Insert hơn 1 triệu records. Đảm bảo đủ RAM và thời gian!")
+        
+        # Tạo ID nếu không được cung cấp
+        preparation_start = time.time()
+        ids = kwargs.get("ids", [str(uuid.uuid4()) for _ in range(total_records)])
+        
+        # Tạo metadata nếu không được cung cấp
+        if metadatas is None:
+            metadatas = [{} for _ in texts]
+        preparation_time = time.time() - preparation_start
+        
+        # Đảm bảo collection đã được load
+        load_start = time.time()
+        if not hasattr(self.collection, '_loaded') or not self.collection._loaded:
+            try:
+                self.collection.load()
+                print(f"Đã load collection '{self.collection_name}' để insert dữ liệu.")
+            except Exception as e:
+                print(f"Warning: Không thể load collection: {e}")
+        load_time = time.time() - load_start
+        
+        all_ids = []
+        total_batches = (total_records + batch_size - 1) // batch_size
+        total_embedding_time = 0
+        total_insert_time = 0
+        
+        # Insert theo batch siêu lớn
+        for i in range(0, total_records, batch_size):
+            batch_num = i // batch_size + 1
+            batch_texts = texts[i:i + batch_size]
+            batch_metadatas = metadatas[i:i + batch_size]
+            batch_ids = ids[i:i + batch_size]
+            
+            batch_start = time.time()
+            progress = (batch_num / total_batches) * 100
+            print(f"\n📦 BATCH {batch_num}/{total_batches} ({progress:.1f}%) - {len(batch_texts):,} records")
+            print(f"   📍 Records: {i+1:,} → {min(i+len(batch_texts), total_records):,}")
+            
+            # Tạo vectors từ batch texts - WITH BATCH EMBEDDING
+            embedding_start = time.time()
+            print(f"   🧠 Batch embedding {len(batch_texts):,} texts...")
+            
+            # SỬ DỤNG BATCH EMBEDDING - SIÊU NHANH!
+            try:
+                # Sử dụng helper method để batch embed
+                batch_vectors = self._batch_embed_texts(batch_texts, embedding_batch_size=400)
+                print(f"   🚀 BATCH EMBEDDING thành công ({len(batch_vectors)} vectors) - siêu tối ưu!")
+                    
+            except Exception as batch_error:
+                print(f"   ⚠️  Batch embedding error: {batch_error}, fallback...")
+                # Fallback to single embedding với progress tracking
+                batch_vectors = []
+                embedding_checkpoint = max(1, len(batch_texts) // 4)
+                
+                for j, text in enumerate(batch_texts):
+                    vector = self.embedding_function(text)
+                    batch_vectors.append(vector)
+                    
+                    if (j + 1) % embedding_checkpoint == 0 or j == len(batch_texts) - 1:
+                        embed_progress = ((j + 1) / len(batch_texts)) * 100
+                        embed_elapsed = time.time() - embedding_start
+                        embed_speed = (j + 1) / embed_elapsed
+                        remaining_embeds = len(batch_texts) - (j + 1)
+                        embed_eta = remaining_embeds / embed_speed if embed_speed > 0 else 0
+                        
+                        print(f"      📊 Embedding: {j+1:,}/{len(batch_texts):,} ({embed_progress:.0f}%) | "
+                              f"Speed: {embed_speed:.0f}/s | ETA: {embed_eta:.1f}s")
+            
+            embedding_time = time.time() - embedding_start
+            total_embedding_time += embedding_time
+            embedding_speed = len(batch_texts) / embedding_time
+            
+            print(f"   ✅ Embedding hoàn thành: {embedding_time:.1f}s ({embedding_speed:.0f} texts/s)")
+            
+            # Chuẩn bị dữ liệu để chèn
+            data_prep_start = time.time()
+            print(f"   🔧 Chuẩn bị dữ liệu để insert...")
+            data = [
+                batch_ids,           # ID field
+                batch_texts,         # Text field  
+                batch_vectors,       # Vector field
+                batch_metadatas,     # Metadata field
+            ]
+            data_prep_time = time.time() - data_prep_start
+            print(f"   ✅ Dữ liệu đã chuẩn bị: {data_prep_time:.2f}s")
+            
+            # Chèn batch vào collection - WITH DETAILED LOGGING  
+            insert_start = time.time()
+            print(f"   💾 Bắt đầu insert {len(batch_texts):,} records vào Milvus...")
+            
+            try:
+                insert_result = self.collection.insert(data)
+                all_ids.extend(batch_ids)
+                insert_time = time.time() - insert_start
+                total_insert_time += insert_time
+                
+                # Chi tiết về insert performance
+                insert_speed = len(batch_texts) / insert_time
+                data_size_mb = (len(batch_texts) * (1000 + 512 * 4)) / (1024 * 1024)  # Ước tính MB
+                
+                print(f"   ✅ Insert hoàn thành: {insert_time:.1f}s ({insert_speed:.0f} rec/s)")
+                print(f"      📊 Data size: ~{data_size_mb:.1f}MB | Insert IDs: {len(insert_result.primary_keys):,}")
+                
+                # Overall batch performance
+                batch_total_time = time.time() - batch_start
+                batch_speed = len(batch_texts) / batch_total_time
+                
+                print(f"   🎯 BATCH SUMMARY:")
+                print(f"      ⏱️  Total: {batch_total_time:.1f}s | Embedding: {embedding_time:.1f}s ({embedding_time/batch_total_time*100:.0f}%) | Insert: {insert_time:.1f}s ({insert_time/batch_total_time*100:.0f}%)")
+                print(f"      ⚡ Speed: {batch_speed:.0f} rec/s total | {len(all_ids):,}/{total_records:,} completed")
+                
+                # Ước tính thời gian còn lại - IMPROVED ETA
+                if batch_num > 1:
+                    avg_time_per_batch = (time.time() - start_time - preparation_time - load_time) / batch_num
+                    remaining_batches = total_batches - batch_num
+                    eta_seconds = remaining_batches * avg_time_per_batch
+                    eta_minutes = eta_seconds / 60
+                    eta_hours = eta_minutes / 60
+                    
+                    if eta_hours >= 1:
+                        print(f"      🕐 ETA: {eta_hours:.1f} giờ ({eta_minutes:.0f} phút)")
+                    else:
+                        print(f"      🕐 ETA: {eta_minutes:.1f} phút")
+                    
+                    # Progress bar visual
+                    bar_length = 30
+                    filled_length = int(bar_length * progress / 100)
+                    bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                    print(f"      📈 [{bar}] {progress:.1f}%")
+                
+            except Exception as e:
+                print(f"   ❌ Lỗi khi insert batch {batch_num}: {e}")
+                raise
+        
+        # Flush một lần duy nhất ở cuối
+        flush_start = time.time()
+        print("🔄 Đang flush tất cả dữ liệu...")
+        self.collection.flush()
+        flush_time = time.time() - flush_start
+        
+        # Tối ưu hóa collection
+        optimize_start = time.time()
+        print("⚡ Đang tối ưu hóa collection...")
+        self.optimize_collection()
+        optimize_time = time.time() - optimize_start
+        
+        # Tính toán thống kê tổng quan
+        total_time = time.time() - start_time
+        overall_speed = len(all_ids) / total_time
+        
+        print(f"🎉 HOÀN THÀNH MEGA INSERT {len(all_ids):,} records!")
+        print(f"📊 THỐNG KÊ MEGA INSERT:")
+        print(f"   📝 Records: {len(all_ids):,}")
+        print(f"   ⏰ Tổng thời gian: {total_time/60:.1f} phút ({total_time:.1f}s)")
+        print(f"   🔧 Preparation: {preparation_time:.1f}s ({preparation_time/total_time*100:.1f}%)")
+        print(f"   🔄 Collection load: {load_time:.1f}s ({load_time/total_time*100:.1f}%)")
+        print(f"   🧠 Total Embedding: {total_embedding_time:.1f}s ({total_embedding_time/total_time*100:.1f}%)")
+        print(f"   💾 Total Insert: {total_insert_time:.1f}s ({total_insert_time/total_time*100:.1f}%)")
+        print(f"   🚀 Final Flush: {flush_time:.1f}s ({flush_time/total_time*100:.1f}%)")
+        print(f"   ⚙️  Optimization: {optimize_time:.1f}s ({optimize_time/total_time*100:.1f}%)")
+        print(f"   ⚡ Tốc độ trung bình: {overall_speed:.0f} records/second")
+        print(f"   💰 Chi phí thời gian trên 1K records: {total_time/total_records*1000:.2f}s")
+        
+        return all_ids

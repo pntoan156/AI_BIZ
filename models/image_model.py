@@ -29,7 +29,7 @@ class ImageSearchResponse(BaseModel):
 
 class ImageMigrateProgressRequest(BaseModel):
     recreate_collection: bool = False
-    batch_size: int = 50  # Giảm batch size xuống 50
+    batch_size: int = 5000  # Giảm batch size xuống 50
     chunk_size: int = 20000
     start_offset: int = 0
     max_chunks: int = 0  # 0 = không giới hạn, xử lý hết tất cả
