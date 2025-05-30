@@ -2,12 +2,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 import time
 from dotenv import load_dotenv
-from services.image_service import search_images_by_name, embed_and_store_images
+from services.image_service import search_images_by_name, embed_and_store_images, upsert_image, get_image_by_id
 from util.image_processor import process_inventory_items_by_chunk
 from workers.migration_worker import migration_worker
 from models.image_model import (
     ImageSearchRequest, ImageSearchResponse,
-    ImageMigrateProgressRequest, ImageMigrateProgressResponse
+    ImageMigrateProgressRequest, ImageMigrateProgressResponse,
+    ImageModel
 )
 
 # Force load .env file và override system environment variables
@@ -142,6 +143,49 @@ async def search_images(request: ImageSearchRequest):
     
     return ImageSearchResponse(results=results)
 
+@app.post("/api/v1/images/upsert")
+async def upsert_image_endpoint(image_model: ImageModel):
+    """
+    Endpoint upsert (thêm mới hoặc cập nhật) một ImageModel trong Milvus
+    
+    Args:
+        image_model (ImageModel): Thông tin image cần upsert
+        
+    Returns:
+        Dict: Kết quả upsert với thông tin chi tiết
+    """
+    try:
+        result = await upsert_image(image_model)
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Image {result['action']} thành công",
+                "data": {
+                    "action": result["action"],
+                    "image_id": result["image_id"],
+                    "image_name": result["image_name"],
+                    "is_update": result.get("is_update", False),
+                    "timing": result["timing"],
+                    "metadata": result["metadata"]
+                }
+            }
+        else:
+            return {
+                "success": False,
+                "error": result["error"],
+                "image_id": result.get("image_id", "unknown")
+            }
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail={
+            "success": False,
+            "error": str(e),
+            "message": "Lỗi server khi upsert image"
+        })
+
 @app.get("/api/v1/images/collection-info")
 async def get_collection_info():
     """
@@ -163,6 +207,47 @@ async def get_collection_info():
             "success": False,
             "error": str(e)
         }
+
+@app.get("/api/v1/images/{image_id}")
+async def get_image_endpoint(image_id: str):
+    """
+    Endpoint lấy thông tin image theo ID
+    
+    Args:
+        image_id (str): ID của image
+        
+    Returns:
+        Dict: Thông tin image
+    """
+    try:
+        result = await get_image_by_id(image_id)
+        
+        if result["success"]:
+            if result["found"]:
+                return {
+                    "success": True,
+                    "data": result["data"]
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Not found",
+                    "message": result["message"]
+                }
+        else:
+            return {
+                "success": False,
+                "error": result["error"]
+            }
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail={
+            "success": False,
+            "error": str(e),
+            "message": "Lỗi server khi lấy thông tin image"
+        })
 
 @app.get("/health")
 async def health():

@@ -231,6 +231,7 @@ class MilvusVectorStore(BaseVectorStore):
             FieldSchema(name=self.id_field, dtype=DataType.VARCHAR, is_primary=True, max_length=100),
             FieldSchema(name=self.text_field, dtype=DataType.VARCHAR, max_length=65535),
             FieldSchema(name=self.text_vector_field, dtype=DataType.FLOAT_VECTOR, dim=dim),
+            FieldSchema(name="image_id", dtype=DataType.VARCHAR, max_length=100),  # Thêm trường image_id riêng
             FieldSchema(name="inventory_item_id", dtype=DataType.VARCHAR, max_length=100),
         ]
         
@@ -323,6 +324,9 @@ class MilvusVectorStore(BaseVectorStore):
         
         # Vector field
         fields.append(FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=text_dim))
+
+        # Thêm trường image_id riêng để lưu ID gốc của image
+        fields.append(FieldSchema(name="image_id", dtype=DataType.VARCHAR, max_length=100))
 
         # Chỉ thêm metadata JSON duy nhất - loại bỏ các trường dư thừa
         fields.append(FieldSchema(name="metadata", dtype=DataType.JSON, is_nullable=True))
@@ -457,10 +461,22 @@ class MilvusVectorStore(BaseVectorStore):
             # Chuẩn bị dữ liệu để chèn (chỉ các trường cần thiết)
             data_prep_start = time.time()
             print(f"   🔧 Chuẩn bị insert data...")
+            
+            # Tạo image_ids từ metadata hoặc sử dụng batch_ids làm fallback
+            batch_image_ids = []
+            for i, metadata in enumerate(batch_metadatas):
+                if isinstance(metadata, dict) and 'image_id' in metadata:
+                    batch_image_ids.append(metadata['image_id'])
+                elif isinstance(metadata, dict) and 'id' in metadata:
+                    batch_image_ids.append(metadata['id'])  # Fallback cho legacy data
+                else:
+                    batch_image_ids.append(batch_ids[i])  # Fallback cuối cùng
+            
             data = [
-                batch_ids,           # ID field
+                batch_ids,           # ID field (primary key)
                 batch_texts,         # Text field  
                 batch_vectors,       # Vector field
+                batch_image_ids,     # Image ID field (trường mới)
                 batch_metadatas,     # Metadata field
             ]
             data_prep_time = time.time() - data_prep_start
@@ -907,10 +923,22 @@ class MilvusVectorStore(BaseVectorStore):
             # Chuẩn bị dữ liệu để chèn
             data_prep_start = time.time()
             print(f"   🔧 Chuẩn bị dữ liệu để insert...")
+            
+            # Tạo image_ids từ metadata hoặc sử dụng batch_ids làm fallback
+            batch_image_ids = []
+            for j, metadata in enumerate(batch_metadatas):
+                if isinstance(metadata, dict) and 'image_id' in metadata:
+                    batch_image_ids.append(metadata['image_id'])
+                elif isinstance(metadata, dict) and 'id' in metadata:
+                    batch_image_ids.append(metadata['id'])  # Fallback cho legacy data
+                else:
+                    batch_image_ids.append(batch_ids[j])  # Fallback cuối cùng
+            
             data = [
-                batch_ids,           # ID field
-                batch_texts,         # Text field  
+                batch_ids,           # ID field (primary key - UUID)
+                batch_texts,         # Text field
                 batch_vectors,       # Vector field
+                batch_image_ids,     # Image ID field (trường mới)
                 batch_metadatas,     # Metadata field
             ]
             data_prep_time = time.time() - data_prep_start
@@ -994,3 +1022,242 @@ class MilvusVectorStore(BaseVectorStore):
         print(f"   💰 Chi phí thời gian trên 1K records: {total_time/total_records*1000:.2f}s")
         
         return all_ids
+
+    def upsert_image(
+        self,
+        image_id: str,
+        image_name: str,
+        image_path: str,
+        category: str,
+        style: str = "",
+        app_name: str = "",
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Upsert (insert or update) một image record trong Milvus
+        
+        Args:
+            image_id: ID của image (primary key)
+            image_name: Tên của image (sẽ được embedding)
+            image_path: Đường dẫn file image
+            category: Danh mục
+            style: Style của image
+            app_name: Tên app
+            
+        Returns:
+            Dict[str, Any]: Kết quả upsert với thông tin chi tiết
+        """
+        import time
+        start_time = time.time()
+        
+        print(f"🔄 Upsert image: {image_id} - {image_name[:50]}...")
+        
+        try:
+            # Đảm bảo collection đã được load
+            if not hasattr(self.collection, '_loaded') or not self.collection._loaded:
+                self.collection.load()
+            
+            # Kiểm tra xem record đã tồn tại chưa (theo image_id field)
+            check_start = time.time()
+            existing_expr = f"image_id == '{image_id}'"
+            existing_results = self.collection.query(
+                expr=existing_expr,
+                output_fields=[self.id_field, self.text_field, "image_id", "metadata"],
+                limit=1
+            )
+            check_time = time.time() - check_start
+            
+            is_update = len(existing_results) > 0
+            action_type = "UPDATE" if is_update else "INSERT"
+            
+            print(f"   🔍 Check existence: {check_time:.3f}s - {action_type}")
+            
+            # Merge dữ liệu cũ với dữ liệu mới
+            merge_start = time.time()
+            if is_update:
+                # Lấy dữ liệu cũ
+                old_record = existing_results[0]
+                old_metadata = old_record.get("metadata", {})
+                old_text = old_record.get(self.text_field, "")
+                old_primary_key = old_record.get(self.id_field, "")  # Giữ nguyên primary key cũ
+                
+                print(f"   📋 Merging with existing data...")
+                print(f"      Primary Key: {old_primary_key} (preserved)")
+                print(f"      Old: {old_text[:30]}...")
+                print(f"      New: {image_name[:30]}...")
+                
+                # Merge metadata: Giữ dữ liệu cũ, override với dữ liệu mới
+                merged_metadata = old_metadata.copy()
+                merged_metadata.update({
+                    "image_id": image_id,
+                    "image_path": image_path,
+                    "image_name": image_name,
+                    "category": category,
+                    "style": style,
+                    "app_name": app_name
+                })
+                
+                # Sử dụng dữ liệu merged với primary key cũ
+                final_primary_key = old_primary_key  # Giữ nguyên UUID cũ
+                final_image_name = image_name
+                final_metadata = merged_metadata
+                
+                # Xóa record cũ sau khi đã lấy dữ liệu
+                delete_start = time.time()
+                print(f"   🗑️  Deleting old record...")
+                self.collection.delete(existing_expr)
+                delete_time = time.time() - delete_start
+                print(f"   ✅ Delete completed: {delete_time:.3f}s")
+            else:
+                # Dữ liệu hoàn toàn mới - tạo UUID mới
+                import uuid
+                final_primary_key = str(uuid.uuid4())  # UUID mới cho INSERT
+                final_image_name = image_name
+                final_metadata = {
+                    "image_id": image_id,
+                    "image_path": image_path,
+                    "image_name": image_name,
+                    "category": category,
+                    "style": style,
+                    "app_name": app_name
+                }
+                delete_time = 0
+                print(f"   🆕 New record with UUID: {final_primary_key}")
+            
+            merge_time = time.time() - merge_start
+            print(f"   🔀 Data merge: {merge_time:.3f}s")
+            
+            # Tạo embedding cho final_image_name
+            embedding_start = time.time()
+            print(f"   🧠 Creating embedding for: {final_image_name}")
+            image_vector = self.embedding_function(final_image_name)
+            embedding_time = time.time() - embedding_start
+            print(f"   ✅ Embedding: {embedding_time:.3f}s ({len(image_vector)} dims)")
+            
+            # Chuẩn bị dữ liệu để insert với primary key đúng
+            data_prep_start = time.time()
+            data = [
+                [final_primary_key],  # ID field (UUID cũ nếu UPDATE, UUID mới nếu INSERT)
+                [final_image_name],   # Text field (đã merge)
+                [image_vector],       # Vector field
+                [image_id],           # Image ID field (business ID)
+                [final_metadata]      # Metadata field (đã merge)
+            ]
+            data_prep_time = time.time() - data_prep_start
+            
+            # Insert record mới
+            insert_start = time.time()
+            print(f"   💾 Inserting new record...")
+            insert_result = self.collection.insert(data)
+            insert_time = time.time() - insert_start
+            print(f"   ✅ Insert: {insert_time:.3f}s")
+            
+            # Flush để đảm bảo dữ liệu được ghi
+            flush_start = time.time()
+            self.collection.flush()
+            flush_time = time.time() - flush_start
+            print(f"   🚀 Flush: {flush_time:.3f}s")
+            
+            # Tính toán tổng thời gian
+            total_time = time.time() - start_time
+            
+            print(f"🎉 {action_type} completed!")
+            print(f"   ⏰ Total time: {total_time:.3f}s")
+            print(f"   📊 Check: {check_time:.3f}s | Merge: {merge_time:.3f}s | Embedding: {embedding_time:.3f}s | Insert: {insert_time:.3f}s | Flush: {flush_time:.3f}s")
+            
+            return {
+                "success": True,
+                "action": action_type.lower(),
+                "primary_key": final_primary_key,  # UUID thực tế trong DB
+                "image_id": image_id,              # Business ID
+                "image_name": final_image_name,    # Sử dụng final name
+                "is_update": is_update,
+                "timing": {
+                    "total_time": total_time,
+                    "check_time": check_time,
+                    "merge_time": merge_time,
+                    "delete_time": delete_time if is_update else 0,
+                    "embedding_time": embedding_time,
+                    "insert_time": insert_time,
+                    "flush_time": flush_time
+                },
+                "metadata": final_metadata,
+                "insert_result": {
+                    "primary_keys": len(insert_result.primary_keys),
+                    "insert_count": insert_result.insert_count
+                }
+            }
+            
+        except Exception as e:
+            total_time = time.time() - start_time
+            error_msg = f"❌ Upsert failed for {image_id}: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            
+            return {
+                "success": False,
+                "action": "error",
+                "image_id": image_id,
+                "image_name": image_name,
+                "error": str(e),
+                "timing": {
+                    "total_time": total_time
+                }
+            }
+
+    def get_image_by_id(self, image_id: str) -> Dict[str, Any]:
+        """
+        Lấy thông tin image theo image_id (không phải primary key)
+        
+        Args:
+            image_id: ID của image trong trường image_id
+            
+        Returns:
+            Dict[str, Any]: Thông tin image hoặc None nếu không tìm thấy
+        """
+        try:
+            # Đảm bảo collection đã được load
+            if not hasattr(self.collection, '_loaded') or not self.collection._loaded:
+                self.collection.load()
+            
+            # Query để lấy image theo image_id field (không phải primary key)
+            expr = f"image_id == '{image_id}'"
+            results = self.collection.query(
+                expr=expr,
+                output_fields=[self.id_field, self.text_field, "image_id", "metadata"],
+                limit=1
+            )
+            
+            if results:
+                result = results[0]
+                metadata = result.get("metadata", {})
+                
+                return {
+                    "success": True,
+                    "found": True,
+                    "data": {
+                        "id": result.get(self.id_field),  # Primary key UUID
+                        "image_id": result.get("image_id", ""),  # Trường image_id 
+                        "text": result.get(self.text_field),
+                        "image_path": metadata.get("image_path", ""),
+                        "image_name": metadata.get("image_name", ""),
+                        "category": metadata.get("category", ""),
+                        "style": metadata.get("style", ""),
+                        "app_name": metadata.get("app_name", ""),
+                        "metadata": metadata
+                    }
+                }
+            else:
+                return {
+                    "success": True,
+                    "found": False,
+                    "message": f"Image với image_id '{image_id}' không tồn tại"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "image_id": image_id
+            }

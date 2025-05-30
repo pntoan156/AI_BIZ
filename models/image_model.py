@@ -4,10 +4,9 @@ from typing import Optional, List
 class ImageModel(BaseModel):
     id: str
     name: str
-    type: str
     unit_name: str
     file_names: str
-    category: str
+    category: str   
     style: Optional[str] = ""
     app_name: Optional[str] = ""
 

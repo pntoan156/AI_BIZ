@@ -2,7 +2,7 @@ import json
 import os
 from typing import Dict, Any, Optional, List, Tuple
 from stores.image_store import ImageStore
-from models.image_model import ProductImageResult, ImageSearchResponse
+from models.image_model import ProductImageResult, ImageSearchResponse, ImageModel
 
 async def search_images_by_name(
     image_name: str,
@@ -163,4 +163,73 @@ async def embed_and_store_images(
                 "total_time": total_time,
                 "error": True
             }
+        }
+
+async def upsert_image(image_model: ImageModel) -> Dict[str, Any]:
+    """
+    Upsert (thêm mới hoặc cập nhật) một ImageModel vào Milvus
+    
+    Args:
+        image_model: ImageModel object chứa thông tin image
+        
+    Returns:
+        Dict[str, Any]: Kết quả upsert
+    """
+    try:
+        # Khởi tạo image store
+        image_store = ImageStore()
+        
+        # Tạo image_name tối ưu cho embedding (không cộng unit_name)
+        image_name = image_model.name
+        if image_model.style and image_model.style.strip():
+            image_name += f" {image_model.style}"
+        
+        # Gọi upsert method từ vectorstore
+        result = image_store.vectorstore.upsert_image(
+            image_id=image_model.id,
+            image_name=image_name,
+            image_path=image_model.file_names,
+            category=image_model.category,
+            style=image_model.style or "",
+            app_name=image_model.app_name or ""
+        )
+        
+        return result
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "action": "error",
+            "image_id": image_model.id if hasattr(image_model, 'id') else "unknown",
+            "error": str(e)
+        }
+
+async def get_image_by_id(image_id: str) -> Dict[str, Any]:
+    """
+    Lấy thông tin image theo ID
+    
+    Args:
+        image_id: ID của image
+        
+    Returns:
+        Dict[str, Any]: Thông tin image
+    """
+    try:
+        # Khởi tạo image store
+        image_store = ImageStore()
+        
+        # Gọi method get_image_by_id từ vectorstore
+        result = image_store.vectorstore.get_image_by_id(image_id)
+        
+        return result
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": str(e),
+            "image_id": image_id
         } 
