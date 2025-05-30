@@ -34,7 +34,8 @@ async def search_images_by_name(
             metadata = doc.get("metadata", {})
             
             result = ProductImageResult(
-                product_name=doc.get("text", ""),  # Sử dụng tên thực tế từ database (text field)
+                product_name=doc.get("text", ""),  # Tên được search (có thể là query input)
+                product_real_name=metadata.get("image_name", doc.get("text", "")),  # Tên thực từ database
                 image_path=metadata.get("image_path", ""),  # Lấy từ metadata
                 category=metadata.get("category", ""),  # Lấy từ metadata
                 style=metadata.get("style", ""),  # Lấy từ metadata

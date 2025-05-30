@@ -17,6 +17,7 @@ class ImageSearchRequest(BaseModel):
     
 class ProductImageResult(BaseModel):
     product_name: str
+    product_real_name: str  # Tên thực của sản phẩm từ database
     image_path: str
     category: str
     style: str
