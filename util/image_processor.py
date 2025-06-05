@@ -65,7 +65,7 @@ async def fetch_inventory_items(
         api_url (str): URL của API get-inventory-items
         page_index (int): Số trang
         page_size (int): Số lượng bản ghi mỗi trang
-        recreate_collection (bool): Nếu True thì onlySynced=False, ngược lại True
+        recreate_collection (bool): Nếu True thì onlyNotSynced=False, ngược lại True
         
     Returns:
         Dict: {
@@ -80,7 +80,7 @@ async def fetch_inventory_items(
     params = {
         "pageIndex": page_index,
         "pageSize": page_size,
-        "onlySynced": not recreate_collection  # Đảo ngược logic: True -> False và False -> True
+        "onlyNotSynced": not recreate_collection  # Đảo ngược logic: True -> False và False -> True
     }
     
     try:
@@ -118,7 +118,7 @@ async def process_inventory_items_in_batches(batch_size: int = 500, recreate_col
     
     Args:
         batch_size (int): Kích thước mỗi batch
-        recreate_collection (bool): Nếu True thì onlySynced=True, ngược lại False
+        recreate_collection (bool): Nếu True thì onlyNotSynced=True, ngược lại False
     
     Returns:
         List[Dict]: Danh sách dữ liệu đã xử lý
@@ -175,7 +175,7 @@ async def process_inventory_items_by_chunk(
         start_offset (int): Vị trí bắt đầu
         api_batch_size (int): Kích thước batch khi gọi API
         max_retries (int): Số lần thử lại tối đa cho mỗi request
-        recreate_collection (bool): Nếu True thì onlySynced=True, ngược lại False
+        recreate_collection (bool): Nếu True thì onlyNotSynced=True, ngược lại False
         
     Returns:
         Dict: {
