@@ -4,8 +4,9 @@ import time
 import uuid
 from typing import Dict, Any, Optional
 from datetime import datetime
+from aiohttp import ClientTimeout, ClientError
 from services.image_service import embed_and_store_images
-from util.image_processor import process_inventory_items_by_chunk
+from util.image_processor import process_inventory_items_by_chunk, cleanup_session
 from models.image_model import ImageMigrateProgressRequest
 
 class MigrationWorker:
@@ -14,6 +15,7 @@ class MigrationWorker:
     def __init__(self):
         self.jobs: Dict[str, Dict[str, Any]] = {}
         self.lock = threading.Lock()
+        self._running_jobs: Dict[str, bool] = {}  # Theo dõi trạng thái running của jobs
     
     def start_migration_job(self, request: ImageMigrateProgressRequest) -> str:
         """
@@ -43,8 +45,10 @@ class MigrationWorker:
                 "start_time": datetime.now(),
                 "end_time": None,
                 "error": None,
-                "request": request.dict()
+                "request": request.dict(),
+                "retry_counts": {}  # Theo dõi số lần retry của từng chunk
             }
+            self._running_jobs[job_id] = True
         
         # Chạy migration trong thread riêng
         thread = threading.Thread(
@@ -73,10 +77,162 @@ class MigrationWorker:
         """Lấy tất cả jobs"""
         with self.lock:
             return self.jobs.copy()
+
+    async def _run_migration_async(self, job_id: str, request: ImageMigrateProgressRequest):
+        """Phiên bản async của _run_migration với xử lý timeout tốt hơn"""
+        try:
+            self._update_job_status(job_id, {
+                "status": "running",
+                "message": "Đang bắt đầu migration..."
+            })
+            
+            total_processed = 0
+            total_errors = 0
+            current_offset = request.start_offset
+            chunk_count = 0
+            
+            while self._running_jobs.get(job_id, False):
+                chunk_count += 1
+                chunk_key = f"chunk_{chunk_count}"
+                retry_count = self.jobs[job_id]["retry_counts"].get(chunk_key, 0)
+                
+                try:
+                    # Xử lý chunk với timeout
+                    async with asyncio.timeout(300):  # timeout 5 phút cho mỗi chunk
+                        print(f"[Job {job_id}] Bắt đầu xử lý chunk {chunk_count}")
+                        
+                        chunk_result = await process_inventory_items_by_chunk(
+                            chunk_size=request.chunk_size,
+                            start_offset=current_offset,
+                            api_batch_size=1000,
+                            max_retries=3,
+                            recreate_collection=request.recreate_collection
+                        )
+                        
+                        if not chunk_result["data"]:
+                            print(f"[Job {job_id}] Chunk {chunk_count}: Không có dữ liệu")
+                            break
+                        
+                        # Xử lý embedding và lưu trữ
+                        embed_result = await self._embed_and_store_with_cancel_check(
+                            job_id,
+                            chunk_result["data"],
+                            request.recreate_collection if chunk_count == 1 else False,
+                            request.batch_size
+                        )
+                        
+                        if embed_result is None:  # Job bị cancel
+                            print(f"[Job {job_id}] Chunk {chunk_count}: Job bị hủy")
+                            return
+                        
+                        # Cập nhật thống kê
+                        total_processed += embed_result["processed_count"]
+                        total_errors += embed_result.get("error_count", 0)
+                        
+                        # Cập nhật progress
+                        self._update_chunk_progress(
+                            job_id, 
+                            chunk_count,
+                            total_processed,
+                            total_errors,
+                            chunk_result
+                        )
+                        
+                        # Cập nhật offset và kiểm tra điều kiện dừng
+                        current_offset = chunk_result["next_offset"]
+                        if not chunk_result["has_more"]:
+                            print(f"[Job {job_id}] Đã xử lý hết dữ liệu")
+                            break
+                        
+                        # Delay giữa các chunk
+                        await asyncio.sleep(2)
+                        
+                except asyncio.TimeoutError:
+                    retry_count += 1
+                    self.jobs[job_id]["retry_counts"][chunk_key] = retry_count
+                    
+                    if retry_count >= 3:  # Giới hạn số lần retry cho mỗi chunk
+                        error_msg = f"Chunk {chunk_count} thất bại sau 3 lần thử do timeout"
+                        self._log_chunk_error(job_id, chunk_count, error_msg)
+                        total_errors += 1
+                        continue
+                    
+                    wait_time = 2 ** retry_count  # exponential backoff
+                    print(f"[Job {job_id}] Chunk {chunk_count} timeout, thử lại lần {retry_count} sau {wait_time}s")
+                    await asyncio.sleep(wait_time)
+                    
+                except Exception as e:
+                    error_msg = f"Lỗi khi xử lý chunk {chunk_count}: {str(e)}"
+                    self._log_chunk_error(job_id, chunk_count, error_msg)
+                    total_errors += 1
+                    continue
+            
+            # Cleanup và hoàn thành
+            await cleanup_session()
+            self._complete_migration(job_id, total_processed, total_errors)
+            
+        except Exception as e:
+            self._handle_migration_error(job_id, e)
+        finally:
+            self._running_jobs.pop(job_id, None)
+    
+    def _run_migration(self, job_id: str, request: ImageMigrateProgressRequest):
+        """Wrapper để chạy async code trong thread"""
+        asyncio.run(self._run_migration_async(job_id, request))
+    
+    def _update_chunk_progress(
+        self, 
+        job_id: str, 
+        chunk_count: int,
+        total_processed: int,
+        total_errors: int,
+        chunk_result: Dict
+    ):
+        """Cập nhật tiến độ sau khi xử lý chunk thành công"""
+        progress = (total_processed / chunk_result["total_records"] * 100) if chunk_result["total_records"] > 0 else 0
+        
+        self._update_job_status(job_id, {
+            "total_processed": total_processed,
+            "total_errors": total_errors,
+            "progress": progress,
+            "current_chunk": chunk_count,
+            "total_records": chunk_result["total_records"],
+            "message": f"Đã xử lý {total_processed}/{chunk_result['total_records']} items ({progress:.1f}%)"
+        })
+    
+    def _log_chunk_error(self, job_id: str, chunk_count: int, error_msg: str):
+        """Log lỗi xử lý chunk"""
+        print(f"[Job {job_id}] {error_msg}")
+        self._update_job_status(job_id, {
+            "message": f"Chunk {chunk_count}: {error_msg}"
+        })
+    
+    def _complete_migration(self, job_id: str, total_processed: int, total_errors: int):
+        """Đánh dấu migration hoàn thành"""
+        self._update_job_status(job_id, {
+            "status": "completed",
+            "progress": 100,
+            "end_time": datetime.now(),
+            "message": f"Hoàn thành! Đã xử lý {total_processed} items, {total_errors} lỗi"
+        })
+    
+    def _handle_migration_error(self, job_id: str, error: Exception):
+        """Xử lý lỗi trong quá trình migration"""
+        error_msg = f"Lỗi trong quá trình migrate: {str(error)}"
+        print(f"[Job {job_id}] {error_msg}")
+        import traceback
+        traceback.print_exc()
+        
+        self._update_job_status(job_id, {
+            "status": "failed",
+            "end_time": datetime.now(),
+            "error": error_msg,
+            "message": error_msg
+        })
     
     def cancel_job(self, job_id: str) -> bool:
         """
-        Hủy job (đánh dấu để dừng)
+        Hủy job đang chạy
         
         Args:
             job_id: ID của job
@@ -86,8 +242,10 @@ class MigrationWorker:
         """
         with self.lock:
             if job_id in self.jobs:
+                self._running_jobs[job_id] = False
                 self.jobs[job_id]["status"] = "cancelled"
                 self.jobs[job_id]["message"] = "Job đã bị hủy"
+                self.jobs[job_id]["end_time"] = datetime.now()
                 return True
             return False
     
@@ -96,167 +254,6 @@ class MigrationWorker:
         with self.lock:
             if job_id in self.jobs:
                 self.jobs[job_id].update(updates)
-    
-    def _run_migration(self, job_id: str, request: ImageMigrateProgressRequest):
-        """
-        Chạy migration trong thread riêng
-        
-        Args:
-            job_id: ID của job
-            request: Thông tin request
-        """
-        try:
-            # Cập nhật trạng thái bắt đầu
-            self._update_job_status(job_id, {
-                "status": "running",
-                "message": "Đang bắt đầu migration..."
-            })
-            
-            total_processed = 0
-            total_errors = 0
-            total_records = 0
-            current_offset = request.start_offset
-            chunk_count = 0
-            total_chunks = 0
-            
-            print(f"[Job {job_id}] Bắt đầu migrate từ offset {current_offset}")
-            
-            while True:
-                # Kiểm tra nếu job bị hủy
-                job_status = self.get_job_status(job_id)
-                if job_status and job_status["status"] == "cancelled":
-                    print(f"[Job {job_id}] Job bị hủy, dừng xử lý")
-                    return
-                
-                chunk_count += 1
-                print(f"[Job {job_id}] === CHUNK {chunk_count} - Offset: {current_offset} ===")
-                
-                # Kiểm tra giới hạn chunks
-                if request.max_chunks > 0 and chunk_count > request.max_chunks:
-                    print(f"[Job {job_id}] Đã đạt giới hạn {request.max_chunks} chunks")
-                    break
-                
-                # Cập nhật trạng thái
-                self._update_job_status(job_id, {
-                    "message": f"Đang xử lý chunk {chunk_count}...",
-                    "current_chunk": chunk_count
-                })
-                
-                # Kiểm tra cancel trước khi fetch data
-                job_status = self.get_job_status(job_id)
-                if job_status and job_status["status"] == "cancelled":
-                    print(f"[Job {job_id}] Job bị hủy trong quá trình fetch data")
-                    return
-                
-                # Xử lý chunk hiện tại
-                chunk_result = asyncio.run(process_inventory_items_by_chunk(
-                    chunk_size=request.chunk_size,
-                    start_offset=current_offset,
-                    api_batch_size=500
-                ))
-                
-                # Cập nhật total_records từ chunk đầu tiên
-                if chunk_count == 1:
-                    total_records = chunk_result["total_records"]
-                    total_chunks = (total_records + request.chunk_size - 1) // request.chunk_size
-                    if request.max_chunks > 0:
-                        total_chunks = min(total_chunks, request.max_chunks)
-                    
-                    self._update_job_status(job_id, {
-                        "total_records": total_records,
-                        "total_chunks": total_chunks
-                    })
-                    
-                    print(f"[Job {job_id}] Tổng số bản ghi: {total_records}, Ước tính {total_chunks} chunks")
-                
-                # Kiểm tra nếu không còn dữ liệu
-                if not chunk_result["data"]:
-                    print(f"[Job {job_id}] Chunk {chunk_count}: Không có dữ liệu, kết thúc")
-                    break
-                
-                print(f"[Job {job_id}] Chunk {chunk_count}: Lấy được {len(chunk_result['data'])} items")
-                
-                # Kiểm tra cancel trước khi embed
-                job_status = self.get_job_status(job_id)
-                if job_status and job_status["status"] == "cancelled":
-                    print(f"[Job {job_id}] Job bị hủy trước khi embed")
-                    return
-                
-                # Embed và lưu trữ chunk hiện tại với cancel checking
-                embed_result = asyncio.run(self._embed_and_store_with_cancel_check(
-                    job_id,
-                    chunk_result["data"], 
-                    request.recreate_collection if chunk_count == 1 else False,
-                    request.batch_size
-                ))
-                
-                # Kiểm tra nếu job bị cancel trong quá trình embed
-                if embed_result is None:
-                    print(f"[Job {job_id}] Job bị hủy trong quá trình embed")
-                    return
-                
-                # Cập nhật thống kê
-                total_processed += embed_result["processed_count"]
-                total_errors += embed_result["error_count"]
-                
-                # Tính phần trăm tiến độ
-                progress_percentage = (total_processed / total_records * 100) if total_records > 0 else 0
-                
-                # Cập nhật trạng thái
-                self._update_job_status(job_id, {
-                    "total_processed": total_processed,
-                    "total_errors": total_errors,
-                    "progress": progress_percentage,
-                    "current_chunk": chunk_count,
-                    "message": f"Đã xử lý {total_processed}/{total_records} items ({progress_percentage:.1f}%)"
-                })
-                
-                print(f"[Job {job_id}] Chunk {chunk_count}: Đã xử lý {embed_result['processed_count']}/{len(chunk_result['data'])} items")
-                print(f"[Job {job_id}] Tổng tiến độ: {total_processed}/{total_records} ({progress_percentage:.1f}%)")
-                
-                # Cập nhật offset cho chunk tiếp theo
-                current_offset = chunk_result["next_offset"]
-                
-                # Kiểm tra nếu đã hết dữ liệu
-                if not chunk_result["has_more"]:
-                    print(f"[Job {job_id}] Hoàn thành! Đã xử lý hết {chunk_count} chunks")
-                    break
-                
-                # Kiểm tra cancel trước khi nghỉ
-                job_status = self.get_job_status(job_id)
-                if job_status and job_status["status"] == "cancelled":
-                    print(f"[Job {job_id}] Job bị hủy trước khi nghỉ")
-                    return
-                
-                # Nghỉ 2 giây giữa các chunk
-                print(f"[Job {job_id}] Nghỉ 2 giây trước chunk tiếp theo...")
-                time.sleep(2)
-            
-            # Hoàn thành thành công
-            self._update_job_status(job_id, {
-                "status": "completed",
-                "progress": 100,
-                "end_time": datetime.now(),
-                "next_offset": current_offset,
-                "has_more": chunk_result.get("has_more", False) if 'chunk_result' in locals() else False,
-                "message": f"Hoàn thành! Đã xử lý {chunk_count} chunks, {total_processed} items thành công, {total_errors} lỗi"
-            })
-            
-            print(f"[Job {job_id}] Migration hoàn thành thành công")
-            
-        except Exception as e:
-            # Xử lý lỗi
-            import traceback
-            error_msg = f"Lỗi trong quá trình migrate: {str(e)}"
-            print(f"[Job {job_id}] {error_msg}")
-            traceback.print_exc()
-            
-            self._update_job_status(job_id, {
-                "status": "failed",
-                "end_time": datetime.now(),
-                "error": error_msg,
-                "message": error_msg
-            })
     
     async def _embed_and_store_with_cancel_check(
         self, 
@@ -269,6 +266,8 @@ class MigrationWorker:
         Embed và store với kiểm tra cancel status - SỬ DỤNG TRỰC TIẾP mega_insert_texts
         """
         from stores.image_store import ImageStore
+        from util.env_loader import get_env
+        from util.image_processor import update_sync_status
         
         # Kiểm tra cancel trước khi bắt đầu
         job_status = self.get_job_status(job_id)
@@ -319,6 +318,31 @@ class MigrationWorker:
                 return None
             
             print(f"[Job {job_id}] hoàn thành: {len(processed_ids):,}/{total_records:,} records")
+            
+            # Cập nhật trạng thái đồng bộ sau mỗi 5000 records
+            if len(processed_ids) > 0:
+                # Chia thành các batch 5000 records để cập nhật
+                batch_size_sync = 5000
+                for i in range(0, len(processed_ids), batch_size_sync):
+                    batch_ids = [metadatas[j]["id"] for j in range(i, min(i + batch_size_sync, len(processed_ids)))]
+                    
+                    # Kiểm tra cancel trước khi cập nhật
+                    job_status = self.get_job_status(job_id)
+                    if job_status and job_status["status"] == "cancelled":
+                        return None
+                    
+                    try:
+                        success = await update_sync_status(batch_ids)
+                        if success:
+                            print(f"[Job {job_id}] Đã cập nhật trạng thái đồng bộ cho {len(batch_ids)} records")
+                        else:
+                            print(f"[Job {job_id}] Lỗi khi cập nhật trạng thái đồng bộ cho batch {i//batch_size_sync + 1}")
+                    except Exception as e:
+                        print(f"[Job {job_id}] Lỗi khi cập nhật trạng thái đồng bộ: {str(e)}")
+                        # Tiếp tục với batch tiếp theo ngay cả khi có lỗi
+                    
+                    # Delay nhỏ giữa các lần cập nhật
+                    await asyncio.sleep(0.5)
             
             return {
                 "success": True,
