@@ -313,22 +313,32 @@ async def update_sync_status(image_ids: List[str]) -> bool:
         async with session.post(
             api_url, 
             headers=headers, 
-            json={"imageIds": image_ids}
+            json=image_ids  # Truyền trực tiếp mảng image_ids
         ) as response:
-            if response.status != 200:
-                print(f"Lỗi khi cập nhật trạng thái đồng bộ: {response.status}")
+            status = response.status
+            print(f"Response status: {status}")
+            
+            if status != 200:
+                response_text = await response.text()
+                print(f"Error response: {response_text}")
+                print(f"Lỗi khi cập nhật trạng thái đồng bộ: {status}")
                 return False
             
+            print(f"Cập nhật thành công {len(image_ids)} records")
+            print(f"=========================\n")
             return True
             
     except asyncio.TimeoutError as e:
         print(f"Timeout khi cập nhật trạng thái đồng bộ: {str(e)}")
+        print(f"=========================\n")
         raise
         
     except aiohttp.ClientError as e:
         print(f"Lỗi kết nối khi cập nhật trạng thái đồng bộ: {str(e)}")
+        print(f"=========================\n")
         raise
         
     except Exception as e:
         print(f"Lỗi không mong đợi khi cập nhật trạng thái đồng bộ: {str(e)}")
+        print(f"=========================\n")
         raise
