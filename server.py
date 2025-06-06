@@ -134,7 +134,7 @@ async def search_images(request: ImageSearchRequest):
         )
         if result.results:
             # Lọc kết quả có trọng số > 0.4
-            weight_threshold = get_env("WEIGHT_THRESHOLD")
+            weight_threshold = float(get_env("WEIGHT_THRESHOLD"))
             filtered_results = [r for r in result.results if r.weight >= weight_threshold]
             if filtered_results:
                 # Lấy kết quả tốt nhất từ các kết quả đã lọc
